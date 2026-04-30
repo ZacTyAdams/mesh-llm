@@ -855,29 +855,33 @@ fn best_peer_performance_hint(peer: &mesh::PeerInfo) -> (Option<String>, Option<
     let best = peer
         .served_model_runtime
         .iter()
-        .filter(|runtime| {
-            !runtime.model_name.trim().is_empty()
-                && (runtime.avg_tokens_per_second_milli.is_some() || runtime.avg_ttft_ms.is_some())
-        })
+        .filter(|runtime| !runtime.model_name.trim().is_empty())
         .min_by(|left, right| {
-            match (left.avg_ttft_ms, right.avg_ttft_ms) {
-                (Some(left_ttft), Some(right_ttft)) => left_ttft.cmp(&right_ttft),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
-            .then_with(|| {
-                match (
-                    left.avg_tokens_per_second_milli,
-                    right.avg_tokens_per_second_milli,
-                ) {
-                    (Some(left_tps), Some(right_tps)) => right_tps.cmp(&left_tps),
+            let left_has_perf =
+                left.avg_tokens_per_second_milli.is_some() || left.avg_ttft_ms.is_some();
+            let right_has_perf =
+                right.avg_tokens_per_second_milli.is_some() || right.avg_ttft_ms.is_some();
+            right_has_perf
+                .cmp(&left_has_perf)
+                .then_with(|| match (left.avg_ttft_ms, right.avg_ttft_ms) {
+                    (Some(left_ttft), Some(right_ttft)) => left_ttft.cmp(&right_ttft),
                     (Some(_), None) => std::cmp::Ordering::Less,
                     (None, Some(_)) => std::cmp::Ordering::Greater,
                     (None, None) => std::cmp::Ordering::Equal,
-                }
-            })
-            .then_with(|| left.model_name.cmp(&right.model_name))
+                })
+                .then_with(|| {
+                    match (
+                        left.avg_tokens_per_second_milli,
+                        right.avg_tokens_per_second_milli,
+                    ) {
+                        (Some(left_tps), Some(right_tps)) => right_tps.cmp(&left_tps),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                })
+                .then_with(|| right.ready.cmp(&left.ready))
+                .then_with(|| left.model_name.cmp(&right.model_name))
         });
 
     if let Some(runtime) = best {
@@ -887,7 +891,13 @@ fn best_peer_performance_hint(peer: &mesh::PeerInfo) -> (Option<String>, Option<
             runtime.avg_ttft_ms,
         )
     } else {
-        (None, None, None)
+        let fallback_model = peer
+            .serving_models
+            .iter()
+            .chain(peer.hosted_models.iter())
+            .find(|model| !model.trim().is_empty())
+            .cloned();
+        (fallback_model, None, None)
     }
 }
 
@@ -1157,7 +1167,57 @@ fn http_route_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iroh::{EndpointAddr, SecretKey};
     use std::collections::HashMap;
+
+    fn make_peer_with_runtime(
+        seed: u8,
+        serving_models: Vec<&str>,
+        runtimes: Vec<mesh::ModelRuntimeDescriptor>,
+    ) -> mesh::PeerInfo {
+        let id = iroh::EndpointId::from(SecretKey::from_bytes(&[seed; 32]).public());
+        mesh::PeerInfo {
+            id,
+            addr: EndpointAddr {
+                id,
+                addrs: Default::default(),
+            },
+            tunnel_port: None,
+            role: mesh::NodeRole::Host { http_port: 9337 },
+            first_joined_mesh_ts: None,
+            models: vec![],
+            vram_bytes: 0,
+            rtt_ms: None,
+            model_source: None,
+            serving_models: serving_models
+                .into_iter()
+                .map(|model| model.to_string())
+                .collect(),
+            hosted_models: vec![],
+            hosted_models_known: false,
+            available_models: vec![],
+            requested_models: vec![],
+            last_seen: std::time::Instant::now(),
+            last_mentioned: std::time::Instant::now(),
+            moe_recovered_at: None,
+            version: None,
+            gpu_name: None,
+            hostname: None,
+            is_soc: None,
+            gpu_vram: None,
+            gpu_reserved_bytes: None,
+            gpu_mem_bandwidth_gbps: None,
+            gpu_compute_tflops_fp32: None,
+            gpu_compute_tflops_fp16: None,
+            available_model_metadata: vec![],
+            experts_summary: None,
+            available_model_sizes: HashMap::new(),
+            served_model_descriptors: vec![],
+            served_model_runtime: runtimes,
+            owner_attestation: None,
+            owner_summary: crate::crypto::OwnershipSummary::default(),
+        }
+    }
 
     #[test]
     fn size_lookup_matches_gguf_filename_variant() {
@@ -1183,5 +1243,36 @@ mod tests {
             size_gb_from_known_sizes(&sizes, "MiniMax-M2.5-Q4_K_M"),
             Some(24.0)
         );
+    }
+
+    #[test]
+    fn best_peer_performance_hint_returns_model_without_metrics() {
+        let peer = make_peer_with_runtime(
+            1,
+            vec!["gemma-4-31B"],
+            vec![mesh::ModelRuntimeDescriptor {
+                model_name: "gemma-4-31B".to_string(),
+                identity_hash: None,
+                context_length: Some(32768),
+                ready: true,
+                avg_tokens_per_second_milli: None,
+                avg_ttft_ms: None,
+            }],
+        );
+
+        let (model, tps, ttft) = best_peer_performance_hint(&peer);
+        assert_eq!(model.as_deref(), Some("gemma-4-31B"));
+        assert_eq!(tps, None);
+        assert_eq!(ttft, None);
+    }
+
+    #[test]
+    fn best_peer_performance_hint_falls_back_to_serving_model_when_no_runtime() {
+        let peer = make_peer_with_runtime(2, vec!["qwen3-32b"], vec![]);
+
+        let (model, tps, ttft) = best_peer_performance_hint(&peer);
+        assert_eq!(model.as_deref(), Some("qwen3-32b"));
+        assert_eq!(tps, None);
+        assert_eq!(ttft, None);
     }
 }
