@@ -151,6 +151,7 @@ struct LoadingProgressState {
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DashboardSnapshot {
+    pub peer_ids: BTreeSet<String>,
     pub llama_process_rows: Vec<DashboardProcessRow>,
     pub webserver_rows: Vec<DashboardEndpointRow>,
     pub loaded_model_rows: Vec<DashboardModelRow>,
@@ -162,6 +163,7 @@ pub struct DashboardSnapshot {
 impl Default for DashboardSnapshot {
     fn default() -> Self {
         Self {
+            peer_ids: BTreeSet::new(),
             llama_process_rows: Vec::new(),
             webserver_rows: Vec::new(),
             loaded_model_rows: Vec::new(),
@@ -1813,6 +1815,7 @@ impl DashboardState {
     }
 
     fn apply_snapshot(&mut self, snapshot: &DashboardSnapshot) {
+        self.peer_ids = snapshot.peer_ids.clone();
         if self.shutdown_in_progress {
             self.merge_shutdown_process_snapshot(snapshot);
         } else {
@@ -7057,6 +7060,7 @@ mod tests {
 
     fn snapshot_fixture(model_rows: usize, request_buckets: usize) -> DashboardSnapshot {
         DashboardSnapshot {
+            peer_ids: BTreeSet::new(),
             llama_process_rows: vec![sample_process_row("llama-server", 8001)],
             webserver_rows: vec![
                 sample_endpoint_row("Console", 3131),
@@ -9596,6 +9600,24 @@ mod tests {
         assert!(rendered.contains("[↑/↓]"));
         assert!(rendered.contains("[R]"));
         assert!(rendered.contains("[Q]"));
+    }
+
+    #[test]
+    fn tui_status_bar_reads_peers_from_snapshot_without_events() {
+        let mut state = DashboardState::default();
+        state.reduce(DashboardAction::SnapshotUpdated(DashboardSnapshot {
+            peer_ids: std::collections::BTreeSet::from([
+                "peer-a".to_string(),
+                "peer-b".to_string(),
+            ]),
+            ..snapshot_fixture(0, 30)
+        }));
+
+        let rendered = render_tui_frame_snapshot(&state, 180, 24);
+        assert!(
+            rendered.contains("peers: 2"),
+            "expected snapshot-backed peer count in {rendered}"
+        );
     }
 
     #[test]

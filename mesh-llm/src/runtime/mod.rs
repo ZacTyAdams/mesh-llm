@@ -38,7 +38,7 @@ use crate::system::{autoupdate, benchmark, hardware, moe_planner};
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -307,6 +307,12 @@ impl DashboardSnapshotProvider for RuntimeDashboardSnapshotProvider {
 
         Box::pin(async move {
             let process_rows = local_processes.lock().await.clone();
+            let peer_ids = node
+                .peers()
+                .await
+                .into_iter()
+                .map(|peer| peer.id.fmt_short().to_string())
+                .collect::<BTreeSet<_>>();
             let request_metrics = node.local_request_metrics_snapshot();
             let accepted_request_counts_len = request_metrics.accepted_request_counts.len();
             let inventory_snapshot = provider.inventory_snapshot().await;
@@ -349,6 +355,7 @@ impl DashboardSnapshotProvider for RuntimeDashboardSnapshotProvider {
             sort_dashboard_endpoint_rows(&mut webserver_rows);
 
             DashboardSnapshot {
+                peer_ids,
                 llama_process_rows: process_rows
                     .into_iter()
                     .map(|process| DashboardProcessRow {
