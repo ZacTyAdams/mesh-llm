@@ -133,7 +133,11 @@ run_worker() {
 
 	echo "[quicktest-gemma] starting worker model: $MODEL_REF"
 	echo "[quicktest-gemma] token source: ${TOKEN_FILE}"
-	"$BIN" "${args[@]}" &
+	if [[ -r /dev/tty ]]; then
+		"$BIN" "${args[@]}" </dev/tty &
+	else
+		"$BIN" "${args[@]}" &
+	fi
 	runtime_pid=$!
 	wait "$runtime_pid"
 	local code=$?

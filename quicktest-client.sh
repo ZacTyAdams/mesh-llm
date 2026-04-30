@@ -135,7 +135,11 @@ run_client() {
 	else
 		echo "[quicktest-client] no token found, bootstrapping a private mesh"
 	fi
-	"$BIN" "${args[@]}" &
+	if [[ -r /dev/tty ]]; then
+		"$BIN" "${args[@]}" </dev/tty &
+	else
+		"$BIN" "${args[@]}" &
+	fi
 	runtime_pid=$!
 	wait "$runtime_pid"
 	local code=$?
