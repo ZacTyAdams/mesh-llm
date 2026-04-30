@@ -17,6 +17,7 @@ BIN="$ROOT_DIR/target/release/mesh-llm"
 #   QUICKTEST_LOG_FORMAT      pretty/json, default pretty
 #   QUICKTEST_MODEL           Model ref to serve
 #   QUICKTEST_INTERACTIVE     1/0, default 0 (enable TUI/interactive terminal mode)
+#   QUICKTEST_ALLOW_WRAPPER_TUI 1/0, default 0 (acknowledge unstable TUI in wrapper mode)
 TOKEN_FILE="${QUICKTEST_TOKEN_FILE:-$HOME/.mesh-llm/quicktest-worker.token}"
 FORCE_DISCOVERY="${QUICKTEST_FORCE_DISCOVERY:-1}"
 DISCOVER_WAIT="${QUICKTEST_DISCOVER_WAIT:-6}"
@@ -27,6 +28,7 @@ LISTEN_ALL="${QUICKTEST_LISTEN_ALL:-1}"
 LOG_FORMAT="${QUICKTEST_LOG_FORMAT:-pretty}"
 MODEL_REF="${QUICKTEST_MODEL:-unsloth/gemma-4-31B-it-GGUF:UD-IQ2_XXS}"
 INTERACTIVE="${QUICKTEST_INTERACTIVE:-0}"
+ALLOW_WRAPPER_TUI="${QUICKTEST_ALLOW_WRAPPER_TUI:-0}"
 
 stop_requested=0
 runtime_pid=""
@@ -48,6 +50,12 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 mkdir -p "$(dirname "$TOKEN_FILE")"
+
+if [[ "$INTERACTIVE" == "1" && "$ALLOW_WRAPPER_TUI" != "1" ]]; then
+	echo "[quicktest-gemma] interactive TUI is unstable in quicktest wrapper mode; forcing non-interactive."
+	echo "[quicktest-gemma] if you want to try it anyway: QUICKTEST_ALLOW_WRAPPER_TUI=1 QUICKTEST_INTERACTIVE=1 ./quicktest-gemma.sh"
+	INTERACTIVE="0"
+fi
 
 discover_lan_token() {
 	local out token
