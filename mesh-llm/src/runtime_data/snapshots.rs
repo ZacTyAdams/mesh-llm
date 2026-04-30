@@ -147,6 +147,7 @@ pub(crate) struct StatusViewSnapshot {
     pub launch_pi: Option<String>,
     pub launch_goose: Option<String>,
     pub inflight_requests: u64,
+    pub mesh_inflight_requests: u64,
     pub mesh_id: Option<String>,
     pub mesh_name: Option<String>,
     pub nostr_discovery: bool,

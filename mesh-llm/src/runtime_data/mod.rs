@@ -383,6 +383,7 @@ mod tests {
             launch_pi: None,
             launch_goose: None,
             inflight_requests: 2,
+            mesh_inflight_requests: 2,
             mesh_id: Some("mesh-1".into()),
             mesh_name: Some("test-mesh".into()),
             nostr_discovery: true,

@@ -724,6 +724,7 @@ impl Node {
                     served_model_descriptors: p.served_model_descriptors.clone(),
                     served_model_runtime: p.served_model_runtime.clone(),
                     owner_attestation: p.owner_attestation.clone(),
+                    inflight_requests: p.inflight_requests,
                 })
                 .collect()
         };
@@ -787,6 +788,7 @@ impl Node {
             served_model_descriptors: my_served_model_descriptors,
             served_model_runtime: my_model_runtime_descriptors,
             owner_attestation: my_owner_attestation,
+            inflight_requests: Some(self.inflight_requests()),
         });
         announcements
     }
@@ -839,6 +841,7 @@ mod tests {
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
             owner_attestation: None,
+            inflight_requests: None,
         }
     }
 

@@ -549,6 +549,7 @@ mod tests {
             served_model_descriptors: descriptors,
             served_model_runtime: runtimes,
             owner_attestation: None,
+            inflight_requests: None,
             owner_summary: OwnershipSummary::default(),
         }
     }

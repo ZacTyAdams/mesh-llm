@@ -697,6 +697,7 @@ pub(crate) struct PeerAnnouncement {
     pub(crate) served_model_descriptors: Vec<ServedModelDescriptor>,
     pub(crate) served_model_runtime: Vec<ModelRuntimeDescriptor>,
     pub(crate) owner_attestation: Option<SignedNodeOwnership>,
+    pub(crate) inflight_requests: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -751,6 +752,7 @@ pub struct PeerInfo {
     pub served_model_descriptors: Vec<ServedModelDescriptor>,
     pub served_model_runtime: Vec<ModelRuntimeDescriptor>,
     pub owner_attestation: Option<SignedNodeOwnership>,
+    pub inflight_requests: Option<u64>,
     pub owner_summary: OwnershipSummary,
 }
 
@@ -807,6 +809,7 @@ impl PeerInfo {
             served_model_descriptors: ann.served_model_descriptors.clone(),
             served_model_runtime: ann.served_model_runtime.clone(),
             owner_attestation: ann.owner_attestation.clone(),
+            inflight_requests: ann.inflight_requests,
             owner_summary,
         }
     }

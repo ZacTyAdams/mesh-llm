@@ -287,6 +287,13 @@ impl RuntimeDataCollector {
             api_port: input.api_port,
         });
         let routing_snapshot = self.routing_snapshot();
+        let mesh_inflight_requests = input.inflight_requests.saturating_add(
+            input
+                .peers
+                .iter()
+                .map(|peer| peer.inflight_requests.unwrap_or(0))
+                .sum::<u64>(),
+        );
 
         StatusViewSnapshot {
             version: input.version.clone(),
@@ -321,6 +328,7 @@ impl RuntimeDataCollector {
             launch_pi: derivation.launch_pi,
             launch_goose: derivation.launch_goose,
             inflight_requests: input.inflight_requests,
+            mesh_inflight_requests,
             mesh_id: input.mesh_id,
             mesh_name: input.mesh_name,
             nostr_discovery: input.nostr_discovery,
@@ -834,6 +842,7 @@ fn build_peer_payload(peer: &mesh::PeerInfo) -> PeerPayload {
         hosted_models_known: peer.hosted_models_known,
         version: peer.version.clone(),
         rtt_ms: peer.rtt_ms,
+        inflight_requests: peer.inflight_requests,
         perf_hint_model,
         avg_tokens_per_second_milli,
         avg_ttft_ms,
@@ -1215,6 +1224,7 @@ mod tests {
             served_model_descriptors: vec![],
             served_model_runtime: runtimes,
             owner_attestation: None,
+            inflight_requests: None,
             owner_summary: crate::crypto::OwnershipSummary::default(),
         }
     }

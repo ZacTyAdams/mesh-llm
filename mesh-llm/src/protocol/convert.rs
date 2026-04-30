@@ -488,6 +488,7 @@ pub(crate) fn local_ann_to_proto_ann(
         gpu_reserved_bytes: ann.gpu_reserved_bytes.clone(),
         hardware,
         first_joined_mesh_ts: ann.first_joined_mesh_ts,
+        inflight_requests: ann.inflight_requests,
     }
 }
 
@@ -648,6 +649,7 @@ pub(crate) fn proto_ann_to_local(
             .owner_attestation
             .as_ref()
             .map(proto_owner_attestation_to_local),
+        inflight_requests: pa.inflight_requests,
     };
     crate::mesh::backfill_legacy_descriptors(&mut ann);
     Some((addr, ann))

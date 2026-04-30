@@ -547,6 +547,7 @@ mod tests {
             gpu_mem_bandwidth_gbps: None,
             gpu_compute_tflops_fp32: None,
             gpu_compute_tflops_fp16: None,
+            inflight_requests: None,
             available_model_metadata: vec![],
             experts_summary: None,
             available_model_sizes: HashMap::new(),
@@ -1211,6 +1212,7 @@ mod tests {
             gpu_mem_bandwidth_gbps: None,
             gpu_compute_tflops_fp32: None,
             gpu_compute_tflops_fp16: None,
+            inflight_requests: None,
             available_model_metadata: vec![],
             experts_summary: None,
             available_model_sizes: HashMap::new(),
@@ -1284,6 +1286,7 @@ mod tests {
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
             owner_attestation: None,
+            inflight_requests: None,
         };
 
         let proto_pa = local_ann_to_proto_ann(&ann);
@@ -1977,6 +1980,7 @@ mod tests {
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
             owner_attestation: None,
+            inflight_requests: None,
         };
 
         let proto_pa = local_ann_to_proto_ann(&ann_with_timestamp);
@@ -2020,6 +2024,7 @@ mod tests {
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
             owner_attestation: None,
+            inflight_requests: None,
         };
 
         let proto_pa = local_ann_to_proto_ann(&ann_without_timestamp);

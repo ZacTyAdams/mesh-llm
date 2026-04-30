@@ -510,9 +510,9 @@ export function DashboardPage({
         />
         <StatCard
           title="Inflight"
-          value={`${status?.inflight_requests ?? 0}`}
+          value={`${status?.mesh_inflight_requests ?? status?.inflight_requests ?? 0}`}
           icon={<Gauge className="h-4 w-4" />}
-          tooltip="Current in-flight request count."
+          tooltip="Current in-flight request count across known mesh peers."
         />
       </div>
 

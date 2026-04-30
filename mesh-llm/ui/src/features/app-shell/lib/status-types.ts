@@ -76,6 +76,7 @@ export type Peer = {
   hosted_models?: string[];
   hosted_models_known?: boolean;
   rtt_ms?: number | null;
+  inflight_requests?: number;
   perf_hint_model?: string;
   avg_tokens_per_second_milli?: number;
   avg_ttft_ms?: number;
@@ -200,6 +201,7 @@ export type StatusPayload = {
   wakeable_nodes?: WakeableNode[];
   local_instances?: LocalInstance[];
   inflight_requests: number;
+  mesh_inflight_requests?: number;
   launch_pi?: string | null;
   launch_goose?: string | null;
   nostr_discovery?: boolean;

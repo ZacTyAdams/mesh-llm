@@ -258,6 +258,7 @@ pub(crate) struct StatusPayload {
     pub(crate) launch_pi: Option<String>,
     pub(crate) launch_goose: Option<String>,
     pub(crate) inflight_requests: u64,
+    pub(crate) mesh_inflight_requests: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mesh_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -303,6 +304,8 @@ pub(crate) struct PeerPayload {
     pub(crate) hosted_models_known: bool,
     pub(crate) version: Option<String>,
     pub(crate) rtt_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) inflight_requests: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) perf_hint_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -638,6 +641,7 @@ mod tests {
             hosted_models_known: false,
             version: Some("0.56.0".to_string()),
             rtt_ms: None,
+            inflight_requests: None,
             perf_hint_model: None,
             avg_tokens_per_second_milli: None,
             avg_ttft_ms: None,
@@ -667,6 +671,7 @@ mod tests {
             hosted_models_known: false,
             version: None,
             rtt_ms: None,
+            inflight_requests: None,
             perf_hint_model: None,
             avg_tokens_per_second_milli: None,
             avg_ttft_ms: None,
@@ -716,6 +721,7 @@ mod tests {
             launch_pi: None,
             launch_goose: None,
             inflight_requests: 0,
+            mesh_inflight_requests: 0,
             mesh_id: None,
             mesh_name: None,
             nostr_discovery: false,
@@ -762,6 +768,7 @@ mod tests {
             launch_pi: None,
             launch_goose: None,
             inflight_requests: 0,
+            mesh_inflight_requests: 0,
             mesh_id: None,
             mesh_name: None,
             nostr_discovery: false,
@@ -815,6 +822,7 @@ mod tests {
             launch_pi: None,
             launch_goose: None,
             inflight_requests: 0,
+            mesh_inflight_requests: 0,
             mesh_id: None,
             mesh_name: None,
             nostr_discovery: false,
@@ -863,6 +871,7 @@ mod tests {
             launch_pi: None,
             launch_goose: None,
             inflight_requests: 0,
+            mesh_inflight_requests: 0,
             mesh_id: None,
             mesh_name: None,
             nostr_discovery: false,
@@ -896,6 +905,7 @@ mod tests {
             hosted_models_known: true,
             version: Some("0.60.2".to_string()),
             rtt_ms: Some(12),
+            inflight_requests: None,
             perf_hint_model: None,
             avg_tokens_per_second_milli: None,
             avg_ttft_ms: None,

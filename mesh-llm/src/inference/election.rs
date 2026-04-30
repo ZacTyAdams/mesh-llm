@@ -3300,6 +3300,7 @@ mod tests {
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
             owner_attestation: None,
+            inflight_requests: None,
             owner_summary: crate::crypto::OwnershipSummary::default(),
         }
     }

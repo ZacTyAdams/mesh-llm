@@ -115,6 +115,7 @@ pub struct PeerInfo {
     pub served_model_descriptors: Vec<ServedModelDescriptor>,
     pub served_model_runtime: Vec<ModelRuntimeDescriptor>,
     pub owner_id: Option<String>,
+    pub inflight_requests: Option<u64>,
 }
 
 impl PeerInfo {
@@ -191,6 +192,7 @@ pub struct PeerAnnouncement {
     pub served_model_descriptors: Vec<ServedModelDescriptor>,
     pub served_model_runtime: Vec<ModelRuntimeDescriptor>,
     pub owner_id: Option<String>,
+    pub inflight_requests: Option<u64>,
 }
 
 pub fn merge_demand(
