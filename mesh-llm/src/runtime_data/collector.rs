@@ -934,11 +934,30 @@ fn size_gb_from_known_sizes(
 }
 
 fn normalize_model_lookup_key(value: &str) -> String {
-    value
+    canonical_model_lookup_value(value)
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
         .map(|ch| ch.to_ascii_lowercase())
         .collect()
+}
+
+fn canonical_model_lookup_value(value: &str) -> &str {
+    let trimmed = value.trim();
+    let leaf = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+    let without_ext = strip_gguf_suffix(leaf);
+    crate::models::local::split_gguf_base_name(without_ext).unwrap_or(without_ext)
+}
+
+fn strip_gguf_suffix(value: &str) -> &str {
+    const GGUF_SUFFIX_LEN: usize = 5;
+
+    if value.len() >= GGUF_SUFFIX_LEN
+        && value[value.len() - GGUF_SUFFIX_LEN..].eq_ignore_ascii_case(".gguf")
+    {
+        &value[..value.len() - GGUF_SUFFIX_LEN]
+    } else {
+        value
+    }
 }
 
 fn is_huggingface_repository_like(repository: &str) -> bool {
@@ -1087,5 +1106,37 @@ fn http_route_stats(
         node_count,
         active_nodes,
         mesh_vram_gb,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn size_lookup_matches_gguf_filename_variant() {
+        let sizes = HashMap::from([(
+            "gemma-4-31B-it-UD-IQ2_XXS.gguf".to_string(),
+            53_000_000_000_u64,
+        )]);
+
+        assert_eq!(
+            size_gb_from_known_sizes(&sizes, "gemma-4-31B-it-UD-IQ2_XXS"),
+            Some(53.0)
+        );
+    }
+
+    #[test]
+    fn size_lookup_matches_split_gguf_filename_variant() {
+        let sizes = HashMap::from([(
+            "MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf".to_string(),
+            24_000_000_000_u64,
+        )]);
+
+        assert_eq!(
+            size_gb_from_known_sizes(&sizes, "MiniMax-M2.5-Q4_K_M"),
+            Some(24.0)
+        );
     }
 }
