@@ -121,6 +121,10 @@ pub fn should_be_host_for_model(
     true
 }
 
+fn peer_is_active_http_host_for_model(peer: &mesh::PeerInfo, model_name: &str) -> bool {
+    peer.routes_http_model(model_name)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DenseLaunchPlan {
     Solo,
@@ -1772,6 +1776,11 @@ pub async fn election_loop(
             .filter(|p| p.is_assigned_model(&model_name))
             .cloned()
             .collect();
+        let active_http_hosts: Vec<mesh::PeerInfo> = model_peers
+            .iter()
+            .filter(|p| peer_is_active_http_host_for_model(p, &model_name))
+            .cloned()
+            .collect();
         let desired_launch = build_dense_launch_plan(
             local_launch_vram,
             model_bytes,
@@ -1790,14 +1799,15 @@ pub async fn election_loop(
             // Distributed mode: elect one host from the model group using the
             // same advertised node capacity every peer observes through gossip.
             should_be_host_for_model(node.id(), my_vram, &model_peers)
-        } else if model_peers.is_empty() {
-            // No other node serving this model — we must host
+        } else if active_http_hosts.is_empty() {
+            // Nobody is currently advertising HTTP inference for this model,
+            // so elect a host immediately instead of staying in standby.
             true
         } else if currently_host {
             // Already running — don't tear down
             true
         } else {
-            // Another node is already serving this model.
+            // Another node is already serving this model over HTTP.
             // Only spin up a duplicate if there's enough demand:
             //   - 2+ clients connected, OR
             //   - 10+ requests in the demand tracker for this model
@@ -1818,7 +1828,8 @@ pub async fn election_loop(
             if !should_dup {
                 emit_info(
                     format!(
-                        "[{model_name}] Peer already serving — standby (clients: {n_clients}, requests: {req_count})"
+                        "[{model_name}] Peer already serving — standby (active hosts: {}, clients: {n_clients}, requests: {req_count})",
+                        active_http_hosts.len()
                     ),
                     None,
                 );
@@ -2045,32 +2056,33 @@ pub async fn election_loop(
             currently_host = false;
             last_running_plan = None;
 
-            let host_peer = model_peers
+            let host_peer = active_http_hosts
                 .iter()
-                .filter(|p| !matches!(p.role, NodeRole::Client))
                 .max_by_key(|p| (p.vram_bytes, p.id));
 
             if let Some(host) = host_peer {
-                if should_be_host_for_model(host.id, host.vram_bytes, &model_peers) {
-                    update_targets(
-                        &node,
-                        &model_name,
-                        InferenceTarget::Remote(host.id),
-                        &target_tx,
-                    )
-                    .await;
-                    let _ = emit_event(OutputEvent::WaitingForPeers {
-                        detail: Some(format!(
-                            "[{}] Worker — host is {} (split mode)",
-                            model_name,
-                            host.id.fmt_short()
-                        )),
-                    });
-                } else {
-                    update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
-                }
+                update_targets(
+                    &node,
+                    &model_name,
+                    InferenceTarget::Remote(host.id),
+                    &target_tx,
+                )
+                .await;
+                let _ = emit_event(OutputEvent::WaitingForPeers {
+                    detail: Some(format!(
+                        "[{}] Worker — host is {} (split mode)",
+                        model_name,
+                        host.id.fmt_short()
+                    )),
+                });
             } else {
                 update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
+                let _ = emit_event(OutputEvent::WaitingForPeers {
+                    detail: Some(format!(
+                        "[{}] Worker — waiting for host advertisement",
+                        model_name,
+                    )),
+                });
             }
             on_change(false, false);
         }
@@ -3406,6 +3418,19 @@ mod tests {
                 min_vram: 110,
             }
         );
+    }
+
+    #[test]
+    fn active_http_host_filter_ignores_workers_for_standby_decisions() {
+        let model = "qwen";
+        let worker = make_dense_peer(make_id(2), 64, Some(10), model);
+        assert!(!peer_is_active_http_host_for_model(&worker, model));
+
+        let mut host = worker.clone();
+        host.role = NodeRole::Host { http_port: 3131 };
+        host.hosted_models = vec![model.to_string()];
+        host.hosted_models_known = true;
+        assert!(peer_is_active_http_host_for_model(&host, model));
     }
 
     #[test]

@@ -385,14 +385,11 @@ impl RuntimeDataCollector {
                 let size_gb = if name == &input.model_name && input.model_size_bytes > 0 {
                     input.model_size_bytes as f64 / 1e9
                 } else {
-                    size_by_name
-                        .get(name)
-                        .map(|size| *size as f64 / 1e9)
-                        .unwrap_or_else(|| {
-                            crate::models::catalog::parse_size_gb(
-                                catalog_entry.map(|m| m.size.as_str()).unwrap_or("0"),
-                            )
-                        })
+                    size_gb_from_known_sizes(&size_by_name, name).unwrap_or_else(|| {
+                        crate::models::catalog::parse_size_gb(
+                            catalog_entry.map(|m| m.size.as_str()).unwrap_or("0"),
+                        )
+                    })
                 };
                 let (request_count, last_active_secs_ago) = match input.active_demand.get(name) {
                     Some(demand) => (
@@ -895,9 +892,53 @@ fn build_local_instances(
 }
 
 fn find_catalog_model(name: &str) -> Option<&'static crate::models::catalog::CatalogModel> {
-    crate::models::catalog::MODEL_CATALOG
-        .iter()
-        .find(|m| m.name == name || m.file.strip_suffix(".gguf").unwrap_or(m.file.as_str()) == name)
+    let normalized_name = normalize_model_lookup_key(name);
+    crate::models::catalog::MODEL_CATALOG.iter().find(|m| {
+        let file_stem = m.file.strip_suffix(".gguf").unwrap_or(m.file.as_str());
+        if m.name.eq_ignore_ascii_case(name) || file_stem.eq_ignore_ascii_case(name) {
+            return true;
+        }
+
+        let normalized_catalog_name = normalize_model_lookup_key(&m.name);
+        if normalized_catalog_name == normalized_name {
+            return true;
+        }
+
+        normalize_model_lookup_key(file_stem) == normalized_name
+    })
+}
+
+fn size_gb_from_known_sizes(
+    sizes_by_name: &std::collections::HashMap<String, u64>,
+    name: &str,
+) -> Option<f64> {
+    if let Some(size) = sizes_by_name.get(name) {
+        return Some(*size as f64 / 1e9);
+    }
+
+    let normalized_name = normalize_model_lookup_key(name);
+    if normalized_name.is_empty() {
+        return None;
+    }
+
+    sizes_by_name.iter().find_map(|(key, size)| {
+        let normalized_key = normalize_model_lookup_key(key);
+        if normalized_key.is_empty() {
+            return None;
+        }
+        let matches = normalized_key == normalized_name
+            || normalized_key.ends_with(&normalized_name)
+            || normalized_name.ends_with(&normalized_key);
+        matches.then_some(*size as f64 / 1e9)
+    })
+}
+
+fn normalize_model_lookup_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
 }
 
 fn is_huggingface_repository_like(repository: &str) -> bool {
