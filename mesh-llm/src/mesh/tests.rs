@@ -844,6 +844,8 @@ fn shared_exact_moe_startup_relaxes_heartbeat_during_convergence() {
         identity_hash: Some("same-model".to_string()),
         context_length: None,
         ready: false,
+        avg_tokens_per_second_milli: None,
+        avg_ttft_ms: None,
     }];
 
     let policy = heartbeat_failure_policy_for_peer(&local_descriptors, &local_runtime, &peer);
@@ -1239,6 +1241,8 @@ fn gossip_frame_roundtrip_preserves_scanned_model_metadata() {
             identity_hash: Some("sha256:abc123".into()),
             context_length: Some(32768),
             ready: true,
+            avg_tokens_per_second_milli: None,
+            avg_ttft_ms: None,
         }],
         owner_attestation: None,
     };

@@ -172,6 +172,48 @@ fn effective_local_launch_vram(
     pinned_gpu.map(|gpu| gpu.vram_bytes).unwrap_or(my_vram)
 }
 
+fn compare_optional_ascending_u32(left: Option<u32>, right: Option<u32>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn compare_optional_descending_u32(left: Option<u32>, right: Option<u32>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => right.cmp(&left),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn compare_dense_split_peer(
+    left: &mesh::PeerInfo,
+    right: &mesh::PeerInfo,
+    model_name: &str,
+) -> std::cmp::Ordering {
+    compare_optional_ascending_u32(
+        left.advertised_avg_ttft_ms(model_name),
+        right.advertised_avg_ttft_ms(model_name),
+    )
+    .then_with(|| {
+        compare_optional_descending_u32(
+            left.advertised_avg_tokens_per_second_milli(model_name),
+            right.advertised_avg_tokens_per_second_milli(model_name),
+        )
+    })
+    .then_with(|| {
+        compare_optional_ascending_u32(
+            left.rtt_ms.or(Some(u32::MAX)),
+            right.rtt_ms.or(Some(u32::MAX)),
+        )
+    })
+    .then_with(|| left.id.cmp(&right.id))
+}
+
 fn build_dense_launch_plan(
     my_vram: u64,
     model_bytes: u64,
@@ -190,7 +232,7 @@ fn build_dense_launch_plan(
         .filter(|p| !matches!(p.role, NodeRole::Client))
         .filter(|p| !matches!(p.rtt_ms, Some(rtt) if rtt > mesh::MAX_SPLIT_RTT_MS))
         .collect();
-    candidates.sort_by_key(|p| (p.rtt_ms.unwrap_or(u32::MAX), p.id));
+    candidates.sort_by(|left, right| compare_dense_split_peer(left, right, model_name));
 
     let mut total_group_vram = my_vram;
     let mut worker_ids = Vec::new();
@@ -3285,6 +3327,49 @@ mod tests {
         );
 
         assert!(should_be_host_for_model(id_a, 60, &peers));
+    }
+
+    #[test]
+    fn dense_launch_plan_prefers_better_perf_hints_over_rtt() {
+        let model = "dense";
+        let id_fast_rtt_slow_perf = make_id(2);
+        let id_slow_rtt_fast_perf = make_id(3);
+
+        let mut fast_rtt_slow_perf = make_dense_peer(id_fast_rtt_slow_perf, 30, Some(15), model);
+        fast_rtt_slow_perf.served_model_runtime = vec![mesh::ModelRuntimeDescriptor {
+            model_name: model.to_string(),
+            identity_hash: None,
+            context_length: Some(8192),
+            ready: true,
+            avg_tokens_per_second_milli: Some(8_000),
+            avg_ttft_ms: Some(900),
+        }];
+
+        let mut slow_rtt_fast_perf = make_dense_peer(id_slow_rtt_fast_perf, 30, Some(80), model);
+        slow_rtt_fast_perf.served_model_runtime = vec![mesh::ModelRuntimeDescriptor {
+            model_name: model.to_string(),
+            identity_hash: None,
+            context_length: Some(8192),
+            ready: true,
+            avg_tokens_per_second_milli: Some(20_000),
+            avg_ttft_ms: Some(220),
+        }];
+
+        let plan = build_dense_launch_plan(
+            60,
+            100,
+            false,
+            model,
+            &[fast_rtt_slow_perf, slow_rtt_fast_perf],
+        );
+
+        assert_eq!(
+            plan,
+            DenseLaunchPlan::Split {
+                worker_ids: vec![id_slow_rtt_fast_perf, id_fast_rtt_slow_perf],
+                total_group_vram: 120,
+            }
+        );
     }
 
     #[test]

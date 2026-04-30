@@ -116,6 +116,8 @@ message ModelRuntimeDescriptor {
   optional string identity_hash = 2;
   optional uint32 context_length = 3;
   bool ready = 4;
+  optional uint32 avg_tokens_per_second_milli = 5;
+  optional uint32 avg_ttft_ms = 6;
 }
 
 message ModelMoeInfo {

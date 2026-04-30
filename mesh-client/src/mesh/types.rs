@@ -54,11 +54,25 @@ pub struct ModelRuntimeDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
     pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_tokens_per_second_milli: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<u32>,
 }
 
 impl ModelRuntimeDescriptor {
     pub fn advertised_context_length(&self) -> Option<u32> {
         self.ready.then_some(self.context_length).flatten()
+    }
+
+    pub fn advertised_avg_tokens_per_second_milli(&self) -> Option<u32> {
+        self.ready
+            .then_some(self.avg_tokens_per_second_milli)
+            .flatten()
+    }
+
+    pub fn advertised_avg_ttft_ms(&self) -> Option<u32> {
+        self.ready.then_some(self.avg_ttft_ms).flatten()
     }
 }
 
@@ -135,6 +149,20 @@ impl PeerInfo {
             .iter()
             .find(|r| r.model_name == model)
             .and_then(ModelRuntimeDescriptor::advertised_context_length)
+    }
+
+    pub fn advertised_avg_tokens_per_second_milli(&self, model: &str) -> Option<u32> {
+        self.served_model_runtime
+            .iter()
+            .find(|runtime| runtime.model_name == model)
+            .and_then(ModelRuntimeDescriptor::advertised_avg_tokens_per_second_milli)
+    }
+
+    pub fn advertised_avg_ttft_ms(&self, model: &str) -> Option<u32> {
+        self.served_model_runtime
+            .iter()
+            .find(|runtime| runtime.model_name == model)
+            .and_then(ModelRuntimeDescriptor::advertised_avg_ttft_ms)
     }
 }
 

@@ -857,6 +857,20 @@ impl PeerInfo {
             .find(|runtime| runtime.model_name == model)
             .and_then(ModelRuntimeDescriptor::advertised_context_length)
     }
+
+    pub fn advertised_avg_tokens_per_second_milli(&self, model: &str) -> Option<u32> {
+        self.served_model_runtime
+            .iter()
+            .find(|runtime| runtime.model_name == model)
+            .and_then(ModelRuntimeDescriptor::advertised_avg_tokens_per_second_milli)
+    }
+
+    pub fn advertised_avg_ttft_ms(&self, model: &str) -> Option<u32> {
+        self.served_model_runtime
+            .iter()
+            .find(|runtime| runtime.model_name == model)
+            .and_then(ModelRuntimeDescriptor::advertised_avg_ttft_ms)
+    }
 }
 
 /// Peers not directly verified within this window are considered stale
@@ -1326,6 +1340,7 @@ impl Node {
         attempt_time: std::time::Duration,
         outcome: crate::network::metrics::AttemptOutcome,
         completion_tokens: Option<u64>,
+        ttft_ms: Option<u64>,
     ) {
         let attempt_target = match target {
             crate::inference::election::InferenceTarget::Local(port)
@@ -1345,6 +1360,7 @@ impl Node {
             attempt_time,
             outcome,
             completion_tokens,
+            ttft_ms,
         );
         self.publish_routing_runtime_snapshot();
     }
@@ -1357,6 +1373,7 @@ impl Node {
         attempt_time: std::time::Duration,
         outcome: crate::network::metrics::AttemptOutcome,
         completion_tokens: Option<u64>,
+        ttft_ms: Option<u64>,
     ) {
         self.routing_metrics.record_attempt(
             model,
@@ -1365,6 +1382,7 @@ impl Node {
             attempt_time,
             outcome,
             completion_tokens,
+            ttft_ms,
         );
         self.publish_routing_runtime_snapshot();
     }
@@ -1954,6 +1972,8 @@ impl Node {
                     identity_hash,
                     context_length: Some(context_length),
                     ready: true,
+                    avg_tokens_per_second_milli: None,
+                    avg_ttft_ms: None,
                 });
             }
         } else {
@@ -1983,6 +2003,8 @@ impl Node {
                 identity_hash,
                 context_length: None,
                 ready: false,
+                avg_tokens_per_second_milli: None,
+                avg_ttft_ms: None,
             });
         }
     }
@@ -2007,6 +2029,55 @@ impl Node {
             .peers
             .get(&peer_id)
             .and_then(|peer| peer.advertised_context_length(model_name))
+    }
+
+    pub async fn peer_model_performance_hint(
+        &self,
+        peer_id: EndpointId,
+        model_name: &str,
+    ) -> (Option<u32>, Option<u32>) {
+        self.state
+            .lock()
+            .await
+            .peers
+            .get(&peer_id)
+            .map(|peer| {
+                (
+                    peer.advertised_avg_tokens_per_second_milli(model_name),
+                    peer.advertised_avg_ttft_ms(model_name),
+                )
+            })
+            .unwrap_or((None, None))
+    }
+
+    pub fn local_target_performance_hint(
+        &self,
+        model_name: &str,
+        target_label: &str,
+    ) -> (Option<u32>, Option<u32>) {
+        let snapshots = self.routing_metrics.model_snapshots();
+        let Some(model_metrics) = snapshots.get(model_name) else {
+            return (None, None);
+        };
+        model_metrics
+            .targets
+            .iter()
+            .find(|target| target.kind == "local" && target.target == target_label)
+            .map(|target| {
+                (
+                    target
+                        .avg_tokens_per_second
+                        .map(|value| (value * 1000.0).round())
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .map(|value| value.min(u32::MAX as f64) as u32),
+                    target
+                        .avg_ttft_ms
+                        .map(|value| value.round())
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .map(|value| value.min(u32::MAX as f64) as u32),
+                )
+            })
+            .unwrap_or((None, None))
     }
 
     pub async fn served_model_descriptors(&self) -> Vec<ServedModelDescriptor> {

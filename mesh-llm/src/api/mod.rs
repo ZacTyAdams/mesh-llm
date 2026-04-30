@@ -1503,6 +1503,8 @@ mod tests {
             identity_hash: None,
             context_length: Some(8192),
             ready: true,
+            avg_tokens_per_second_milli: None,
+            avg_ttft_ms: None,
         }];
 
         assert_eq!(MeshApi::derive_peer_state(&peer), NodeState::Client);
@@ -1519,6 +1521,8 @@ mod tests {
             identity_hash: None,
             context_length: Some(8192),
             ready: true,
+            avg_tokens_per_second_milli: None,
+            avg_ttft_ms: None,
         }];
 
         assert_eq!(MeshApi::derive_peer_state(&peer), NodeState::Serving);
@@ -1533,6 +1537,8 @@ mod tests {
             identity_hash: None,
             context_length: None,
             ready: false,
+            avg_tokens_per_second_milli: None,
+            avg_ttft_ms: None,
         }];
 
         assert_eq!(MeshApi::derive_peer_state(&peer), NodeState::Loading);
@@ -3104,6 +3110,7 @@ mod tests {
             Duration::from_millis(16),
             crate::network::metrics::AttemptOutcome::Timeout,
             None,
+            None,
         );
         node.record_inference_attempt(
             Some("test-model"),
@@ -3112,6 +3119,7 @@ mod tests {
             Duration::from_millis(48),
             crate::network::metrics::AttemptOutcome::Success,
             Some(12),
+            None,
         );
         node.record_routed_request(
             Some("test-model"),
@@ -3172,6 +3180,7 @@ mod tests {
             Duration::from_millis(24),
             crate::network::metrics::AttemptOutcome::Success,
             Some(9),
+            None,
         );
         node.record_routed_request(
             Some(&model_name),

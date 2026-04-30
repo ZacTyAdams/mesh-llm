@@ -3,6 +3,26 @@
 
 use super::*;
 
+fn f64_to_u32_rounded(value: f64) -> Option<u32> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let rounded = value.round();
+    if rounded > u32::MAX as f64 {
+        Some(u32::MAX)
+    } else {
+        Some(rounded as u32)
+    }
+}
+
+fn tps_to_milli_u32(value: Option<f64>) -> Option<u32> {
+    f64_to_u32_rounded(value?.mul_add(1000.0, 0.0))
+}
+
+fn ttft_to_u32(value: Option<f64>) -> Option<u32> {
+    f64_to_u32_rounded(value?)
+}
+
 pub fn backfill_legacy_descriptors(ann: &mut PeerAnnouncement) {
     if ann.served_model_descriptors.is_empty() {
         let primary_model_name = ann
@@ -645,7 +665,18 @@ impl Node {
         let my_source = self.model_source.lock().await.clone();
         let my_serving_models = self.serving_models.lock().await.clone();
         let my_served_model_descriptors = self.served_model_descriptors.lock().await.clone();
-        let my_model_runtime_descriptors = self.model_runtime_descriptors.lock().await.clone();
+        let mut my_model_runtime_descriptors = self.model_runtime_descriptors.lock().await.clone();
+        let model_routing_metrics = self.routing_metrics.model_snapshots();
+        for runtime in &mut my_model_runtime_descriptors {
+            if let Some(metrics) = model_routing_metrics.get(&runtime.model_name) {
+                runtime.avg_tokens_per_second_milli =
+                    tps_to_milli_u32(metrics.avg_tokens_per_second);
+                runtime.avg_ttft_ms = ttft_to_u32(metrics.avg_ttft_ms);
+            } else {
+                runtime.avg_tokens_per_second_milli = None;
+                runtime.avg_ttft_ms = None;
+            }
+        }
         let my_hosted_models = self.hosted_models.lock().await.clone();
         let my_available = self.available_models.lock().await.clone();
         let my_requested = self.requested_models.lock().await.clone();

@@ -102,6 +102,7 @@ enum RouteAttemptResult {
     Delivered {
         status_code: u16,
         completion_tokens: Option<u64>,
+        ttft_ms: Option<u64>,
     },
     RetryableTimeout,
     RetryableUnavailable,
@@ -805,6 +806,25 @@ fn ceil_div_u32(value: u32, divisor: u32) -> u32 {
     value.saturating_add(divisor - 1) / divisor
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RoutingPerformanceHint {
+    avg_tokens_per_second_milli: Option<u32>,
+    avg_ttft_ms: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoutingRequestClass {
+    Interactive,
+    Throughput,
+}
+
+fn routing_request_class(required_tokens: Option<u32>) -> RoutingRequestClass {
+    match required_tokens {
+        Some(tokens) if tokens >= 2048 => RoutingRequestClass::Throughput,
+        _ => RoutingRequestClass::Interactive,
+    }
+}
+
 #[cfg(test)]
 fn request_budget_tokens(body: &serde_json::Value) -> Option<u32> {
     let serialized = serde_json::to_vec(body).ok()?;
@@ -835,35 +855,98 @@ pub(crate) fn request_budget_tokens_from_parts(
     )
 }
 
+fn compare_routing_performance(
+    left: RoutingPerformanceHint,
+    right: RoutingPerformanceHint,
+    request_class: RoutingRequestClass,
+) -> std::cmp::Ordering {
+    match request_class {
+        RoutingRequestClass::Interactive => match (left.avg_ttft_ms, right.avg_ttft_ms) {
+            (Some(left_ttft), Some(right_ttft)) => left_ttft.cmp(&right_ttft),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| {
+            match (
+                left.avg_tokens_per_second_milli,
+                right.avg_tokens_per_second_milli,
+            ) {
+                (Some(left_tps), Some(right_tps)) => right_tps.cmp(&left_tps),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        }),
+        RoutingRequestClass::Throughput => match (
+            left.avg_tokens_per_second_milli,
+            right.avg_tokens_per_second_milli,
+        ) {
+            (Some(left_tps), Some(right_tps)) => right_tps.cmp(&left_tps),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| match (left.avg_ttft_ms, right.avg_ttft_ms) {
+            (Some(left_ttft), Some(right_ttft)) => left_ttft.cmp(&right_ttft),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }),
+    }
+}
+
+fn sort_candidates_by_performance<T: Clone>(
+    candidates: &[(T, RoutingPerformanceHint)],
+    request_class: RoutingRequestClass,
+) -> Vec<T> {
+    let mut indexed = candidates.iter().enumerate().collect::<Vec<_>>();
+    indexed.sort_by(
+        |(left_index, (_, left_perf)), (right_index, (_, right_perf))| {
+            compare_routing_performance(*left_perf, *right_perf, request_class)
+                .then_with(|| left_index.cmp(right_index))
+        },
+    );
+    indexed
+        .into_iter()
+        .map(|(_, (candidate, _))| candidate.clone())
+        .collect()
+}
+
 fn reorder_candidates_by_context<T: Clone>(
-    candidates: &[(T, Option<u32>)],
+    candidates: &[(T, Option<u32>, RoutingPerformanceHint)],
     required_tokens: Option<u32>,
 ) -> Vec<T> {
+    let request_class = routing_request_class(required_tokens);
     let Some(required_tokens) = required_tokens else {
-        return candidates
-            .iter()
-            .map(|(candidate, _)| candidate.clone())
-            .collect();
+        return sort_candidates_by_performance(
+            &candidates
+                .iter()
+                .map(|(candidate, _, perf)| (candidate.clone(), *perf))
+                .collect::<Vec<_>>(),
+            request_class,
+        );
     };
 
     let mut adequate = Vec::new();
     let mut unknown = Vec::new();
-    for (candidate, context_length) in candidates {
+    for (candidate, context_length, perf) in candidates {
         match context_length {
-            Some(value) if *value >= required_tokens => adequate.push(candidate.clone()),
+            Some(value) if *value >= required_tokens => adequate.push((candidate.clone(), *perf)),
             Some(_) => {}
-            None => unknown.push(candidate.clone()),
+            None => unknown.push((candidate.clone(), *perf)),
         }
     }
 
     if adequate.is_empty() && unknown.is_empty() {
         candidates
             .iter()
-            .map(|(candidate, _)| candidate.clone())
+            .map(|(candidate, _, _)| candidate.clone())
             .collect()
     } else {
-        adequate.extend(unknown);
-        adequate
+        let mut ordered = sort_candidates_by_performance(&adequate, request_class);
+        ordered.extend(sort_candidates_by_performance(&unknown, request_class));
+        ordered
     }
 }
 
@@ -875,7 +958,16 @@ async fn order_remote_hosts_by_context(
 ) -> Vec<iroh::EndpointId> {
     let mut candidates = Vec::with_capacity(hosts.len());
     for host in hosts {
-        candidates.push((*host, node.peer_model_context_length(*host, model).await));
+        let (avg_tokens_per_second_milli, avg_ttft_ms) =
+            node.peer_model_performance_hint(*host, model).await;
+        candidates.push((
+            *host,
+            node.peer_model_context_length(*host, model).await,
+            RoutingPerformanceHint {
+                avg_tokens_per_second_milli,
+                avg_ttft_ms,
+            },
+        ));
     }
     reorder_candidates_by_context(&candidates, required_tokens)
 }
@@ -888,17 +980,33 @@ async fn order_targets_by_context(
 ) -> Vec<election::InferenceTarget> {
     let mut candidates = Vec::with_capacity(targets.len());
     for target in targets {
-        let context_length = match target {
-            election::InferenceTarget::Local(_) | election::InferenceTarget::MoeLocal(_) => {
-                node.local_model_context_length(model).await
+        let (context_length, perf) = match target {
+            election::InferenceTarget::Local(port) | election::InferenceTarget::MoeLocal(port) => {
+                (node.local_model_context_length(model).await, {
+                    let target_label = format!("127.0.0.1:{port}");
+                    let (avg_tokens_per_second_milli, avg_ttft_ms) =
+                        node.local_target_performance_hint(model, &target_label);
+                    RoutingPerformanceHint {
+                        avg_tokens_per_second_milli,
+                        avg_ttft_ms,
+                    }
+                })
             }
             election::InferenceTarget::Remote(peer_id)
             | election::InferenceTarget::MoeRemote(peer_id) => {
-                node.peer_model_context_length(*peer_id, model).await
+                let (avg_tokens_per_second_milli, avg_ttft_ms) =
+                    node.peer_model_performance_hint(*peer_id, model).await;
+                (
+                    node.peer_model_context_length(*peer_id, model).await,
+                    RoutingPerformanceHint {
+                        avg_tokens_per_second_milli,
+                        avg_ttft_ms,
+                    },
+                )
             }
-            election::InferenceTarget::None => None,
+            election::InferenceTarget::None => (None, RoutingPerformanceHint::default()),
         };
-        candidates.push((target.clone(), context_length));
+        candidates.push((target.clone(), context_length, perf));
     }
     reorder_candidates_by_context(&candidates, required_tokens)
 }
@@ -1018,6 +1126,8 @@ async fn relay_translated_responses_stream<R: AsyncRead + Unpin>(
     let mut output_text = String::new();
     let mut usage = None;
     let mut observed_completion_tokens = None;
+    let relay_started = std::time::Instant::now();
+    let mut first_content_at: Option<std::time::Instant> = None;
     let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
     tcp_stream.write_all(header.as_bytes()).await?;
 
@@ -1073,6 +1183,9 @@ async fn relay_translated_responses_stream<R: AsyncRead + Unpin>(
                 .and_then(|choice| choice.delta.as_ref())
                 .and_then(|delta| delta.content.as_deref())
             {
+                if first_content_at.is_none() {
+                    first_content_at = Some(std::time::Instant::now());
+                }
                 output_text.push_str(delta);
                 let event = serde_json::to_string(&response_adapter::responses_stream_delta_event(
                     &item_id, delta,
@@ -1154,9 +1267,11 @@ async fn relay_translated_responses_stream<R: AsyncRead + Unpin>(
     response_adapter::write_chunked_sse_event(tcp_stream, Some("done"), "[DONE]").await?;
     let _ = tcp_stream.write_all(b"0\r\n\r\n").await;
     let _ = tcp_stream.shutdown().await;
+    let ttft_ms = first_content_at.map(|t| t.duration_since(relay_started).as_millis() as u64);
     Ok(RouteAttemptResult::Delivered {
         status_code: probe.status_code,
         completion_tokens: observed_completion_tokens,
+        ttft_ms,
     })
 }
 
@@ -1191,6 +1306,7 @@ async fn relay_translated_responses_json<R: AsyncRead + Unpin>(
     Ok(RouteAttemptResult::Delivered {
         status_code: probe.status_code,
         completion_tokens,
+        ttft_ms: None,
     })
 }
 
@@ -1465,6 +1581,7 @@ async fn relay_error_response<R: AsyncRead + Unpin>(
     Ok(RouteAttemptResult::Delivered {
         status_code,
         completion_tokens: None,
+        ttft_ms: None,
     })
 }
 
@@ -1512,6 +1629,7 @@ async fn relay_probed_response<R: AsyncRead + Unpin>(
             return Ok(RouteAttemptResult::Delivered {
                 status_code: probe.status_code,
                 completion_tokens,
+                ttft_ms: None,
             });
         }
     }
@@ -1524,6 +1642,7 @@ async fn relay_probed_response<R: AsyncRead + Unpin>(
     Ok(RouteAttemptResult::Delivered {
         status_code: probe.status_code,
         completion_tokens: None,
+        ttft_ms: None,
     })
 }
 
@@ -1570,6 +1689,7 @@ async fn route_local_attempt(
                             RouteAttemptResult::Delivered {
                                 status_code,
                                 completion_tokens: None,
+                                ttft_ms: None,
                             }
                         }
                     }
@@ -1634,6 +1754,7 @@ async fn route_remote_attempt(
                             RouteAttemptResult::Delivered {
                                 status_code,
                                 completion_tokens: None,
+                                ttft_ms: None,
                             }
                         }
                     }
@@ -1748,6 +1869,7 @@ async fn route_http_endpoint_attempt(
                             RouteAttemptResult::Delivered {
                                 status_code,
                                 completion_tokens: None,
+                                ttft_ms: None,
                             }
                         }
                     }
@@ -2126,6 +2248,7 @@ pub async fn handle_mesh_request(
             RouteAttemptResult::Delivered {
                 status_code,
                 completion_tokens,
+                ttft_ms,
             } => node.record_inference_attempt(
                 effective_model.as_deref(),
                 &attempt_target,
@@ -2133,6 +2256,7 @@ pub async fn handle_mesh_request(
                 attempt_time,
                 delivered_attempt_outcome(*status_code),
                 *completion_tokens,
+                *ttft_ms,
             ),
             RouteAttemptResult::RetryableTimeout => node.record_inference_attempt(
                 effective_model.as_deref(),
@@ -2140,6 +2264,7 @@ pub async fn handle_mesh_request(
                 queue_wait,
                 attempt_time,
                 crate::network::metrics::AttemptOutcome::Timeout,
+                None,
                 None,
             ),
             RouteAttemptResult::RetryableUnavailable => node.record_inference_attempt(
@@ -2149,6 +2274,7 @@ pub async fn handle_mesh_request(
                 attempt_time,
                 crate::network::metrics::AttemptOutcome::Unavailable,
                 None,
+                None,
             ),
             RouteAttemptResult::RetryableContextOverflow => node.record_inference_attempt(
                 effective_model.as_deref(),
@@ -2157,14 +2283,12 @@ pub async fn handle_mesh_request(
                 attempt_time,
                 crate::network::metrics::AttemptOutcome::ContextOverflow,
                 None,
+                None,
             ),
             RouteAttemptResult::ClientDisconnected => {}
         }
         match attempt_result {
-            RouteAttemptResult::Delivered {
-                status_code,
-                completion_tokens: _,
-            } => {
+            RouteAttemptResult::Delivered { status_code, .. } => {
                 if should_learn_affinity(status_code) {
                     if let (Some(name), Some(prefix_hash)) =
                         (effective_model.as_ref(), prepared.learn_prefix_hash)
@@ -2414,6 +2538,7 @@ pub async fn route_model_request(
             RouteAttemptResult::Delivered {
                 status_code,
                 completion_tokens,
+                ttft_ms,
             } => node.record_inference_attempt(
                 Some(model),
                 &target,
@@ -2421,6 +2546,7 @@ pub async fn route_model_request(
                 attempt_time,
                 delivered_attempt_outcome(*status_code),
                 *completion_tokens,
+                *ttft_ms,
             ),
             RouteAttemptResult::RetryableTimeout => node.record_inference_attempt(
                 Some(model),
@@ -2428,6 +2554,7 @@ pub async fn route_model_request(
                 queue_wait,
                 attempt_time,
                 crate::network::metrics::AttemptOutcome::Timeout,
+                None,
                 None,
             ),
             RouteAttemptResult::RetryableUnavailable => node.record_inference_attempt(
@@ -2437,6 +2564,7 @@ pub async fn route_model_request(
                 attempt_time,
                 crate::network::metrics::AttemptOutcome::Unavailable,
                 None,
+                None,
             ),
             RouteAttemptResult::RetryableContextOverflow => node.record_inference_attempt(
                 Some(model),
@@ -2444,6 +2572,7 @@ pub async fn route_model_request(
                 queue_wait,
                 attempt_time,
                 crate::network::metrics::AttemptOutcome::ContextOverflow,
+                None,
                 None,
             ),
             RouteAttemptResult::ClientDisconnected => {}
@@ -2459,10 +2588,7 @@ pub async fn route_model_request(
             "openai route_model_request attempt"
         );
         match attempt_result {
-            RouteAttemptResult::Delivered {
-                status_code,
-                completion_tokens: _,
-            } => {
+            RouteAttemptResult::Delivered { status_code, .. } => {
                 if should_learn_affinity(status_code) {
                     if let Some(prefix_hash) = selection.learn_prefix_hash {
                         affinity.learn_target(model, prefix_hash, &target);
@@ -2642,6 +2768,7 @@ pub async fn route_moe_request(
             RouteAttemptResult::Delivered {
                 status_code,
                 completion_tokens,
+                ttft_ms,
             } => node.record_inference_attempt(
                 Some(model),
                 &target,
@@ -2649,6 +2776,7 @@ pub async fn route_moe_request(
                 attempt_time,
                 delivered_attempt_outcome(*status_code),
                 *completion_tokens,
+                *ttft_ms,
             ),
             RouteAttemptResult::RetryableTimeout => node.record_inference_attempt(
                 Some(model),
@@ -2656,6 +2784,7 @@ pub async fn route_moe_request(
                 queue_wait,
                 attempt_time,
                 crate::network::metrics::AttemptOutcome::Timeout,
+                None,
                 None,
             ),
             RouteAttemptResult::RetryableUnavailable => node.record_inference_attempt(
@@ -2665,6 +2794,7 @@ pub async fn route_moe_request(
                 attempt_time,
                 crate::network::metrics::AttemptOutcome::Unavailable,
                 None,
+                None,
             ),
             RouteAttemptResult::RetryableContextOverflow => node.record_inference_attempt(
                 Some(model),
@@ -2672,6 +2802,7 @@ pub async fn route_moe_request(
                 queue_wait,
                 attempt_time,
                 crate::network::metrics::AttemptOutcome::ContextOverflow,
+                None,
                 None,
             ),
             RouteAttemptResult::ClientDisconnected => {}
@@ -2688,10 +2819,7 @@ pub async fn route_moe_request(
             "openai route_moe_request attempt"
         );
         match attempt_result {
-            RouteAttemptResult::Delivered {
-                status_code,
-                completion_tokens: _,
-            } => {
+            RouteAttemptResult::Delivered { status_code, .. } => {
                 let service = match target {
                     election::InferenceTarget::Local(_)
                     | election::InferenceTarget::MoeLocal(_) => {
@@ -2812,10 +2940,9 @@ pub async fn route_to_target(
         Duration::ZERO,
         route_started.elapsed(),
         match &result {
-            RouteAttemptResult::Delivered {
-                status_code,
-                completion_tokens: _,
-            } => delivered_attempt_outcome(*status_code),
+            RouteAttemptResult::Delivered { status_code, .. } => {
+                delivered_attempt_outcome(*status_code)
+            }
             RouteAttemptResult::RetryableTimeout => {
                 crate::network::metrics::AttemptOutcome::Timeout
             }
@@ -2835,6 +2962,10 @@ pub async fn route_to_target(
             } => *completion_tokens,
             _ => None,
         },
+        match &result {
+            RouteAttemptResult::Delivered { ttft_ms, .. } => *ttft_ms,
+            _ => None,
+        },
     );
     tracing::info!(
         target = ?target,
@@ -2843,10 +2974,7 @@ pub async fn route_to_target(
         "openai route_to_target result"
     );
     match result {
-        RouteAttemptResult::Delivered {
-            status_code,
-            completion_tokens: _,
-        } => {
+        RouteAttemptResult::Delivered { status_code, .. } => {
             let service = match target {
                 election::InferenceTarget::Local(_) | election::InferenceTarget::MoeLocal(_) => {
                     crate::network::metrics::RequestService::Local
@@ -2906,10 +3034,9 @@ pub async fn route_http_endpoint_request(
         Duration::ZERO,
         started.elapsed(),
         match &result {
-            RouteAttemptResult::Delivered {
-                status_code,
-                completion_tokens: _,
-            } => delivered_attempt_outcome(*status_code),
+            RouteAttemptResult::Delivered { status_code, .. } => {
+                delivered_attempt_outcome(*status_code)
+            }
             RouteAttemptResult::RetryableTimeout => {
                 crate::network::metrics::AttemptOutcome::Timeout
             }
@@ -2929,6 +3056,10 @@ pub async fn route_http_endpoint_request(
             } => *completion_tokens,
             _ => None,
         },
+        match &result {
+            RouteAttemptResult::Delivered { ttft_ms, .. } => *ttft_ms,
+            _ => None,
+        },
     );
     tracing::info!(
         endpoint = base_url,
@@ -2938,10 +3069,7 @@ pub async fn route_http_endpoint_request(
         "openai route_http_endpoint_request result"
     );
     match result {
-        RouteAttemptResult::Delivered {
-            status_code,
-            completion_tokens: _,
-        } => {
+        RouteAttemptResult::Delivered { status_code, .. } => {
             node.record_routed_request(
                 model,
                 1,
@@ -3318,6 +3446,7 @@ mod tests {
             route_attempt_result_label(&RouteAttemptResult::Delivered {
                 status_code: 200,
                 completion_tokens: None,
+                ttft_ms: None,
             }),
             "delivered"
         );
@@ -3508,7 +3637,11 @@ mod tests {
     #[test]
     fn test_reorder_candidates_by_context_prefers_known_fit_then_unknown() {
         let ordered = reorder_candidates_by_context(
-            &[(1u8, Some(4096)), (2u8, None), (3u8, Some(16384))],
+            &[
+                (1u8, Some(4096), RoutingPerformanceHint::default()),
+                (2u8, None, RoutingPerformanceHint::default()),
+                (3u8, Some(16384), RoutingPerformanceHint::default()),
+            ],
             Some(8192),
         );
 
@@ -3517,10 +3650,123 @@ mod tests {
 
     #[test]
     fn test_reorder_candidates_by_context_falls_back_when_all_known_too_small() {
-        let ordered =
-            reorder_candidates_by_context(&[(1u8, Some(4096)), (2u8, Some(6144))], Some(8192));
+        let ordered = reorder_candidates_by_context(
+            &[
+                (1u8, Some(4096), RoutingPerformanceHint::default()),
+                (2u8, Some(6144), RoutingPerformanceHint::default()),
+            ],
+            Some(8192),
+        );
 
         assert_eq!(ordered, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_reorder_candidates_by_context_prefers_lower_ttft_within_fit_group() {
+        let ordered = reorder_candidates_by_context(
+            &[
+                (
+                    1u8,
+                    Some(16384),
+                    RoutingPerformanceHint {
+                        avg_tokens_per_second_milli: Some(18_000),
+                        avg_ttft_ms: Some(900),
+                    },
+                ),
+                (
+                    2u8,
+                    Some(16384),
+                    RoutingPerformanceHint {
+                        avg_tokens_per_second_milli: Some(14_000),
+                        avg_ttft_ms: Some(250),
+                    },
+                ),
+            ],
+            Some(512),
+        );
+
+        assert_eq!(ordered, vec![2, 1]);
+    }
+
+    #[test]
+    fn test_reorder_candidates_by_context_prefers_higher_tps_when_ttft_missing() {
+        let ordered = reorder_candidates_by_context(
+            &[
+                (
+                    1u8,
+                    Some(16384),
+                    RoutingPerformanceHint {
+                        avg_tokens_per_second_milli: Some(12_000),
+                        avg_ttft_ms: None,
+                    },
+                ),
+                (
+                    2u8,
+                    Some(16384),
+                    RoutingPerformanceHint {
+                        avg_tokens_per_second_milli: Some(24_000),
+                        avg_ttft_ms: None,
+                    },
+                ),
+            ],
+            Some(512),
+        );
+
+        assert_eq!(ordered, vec![2, 1]);
+    }
+
+    #[test]
+    fn test_reorder_candidates_by_context_sorts_by_perf_without_token_budget() {
+        let ordered = reorder_candidates_by_context(
+            &[
+                (
+                    1u8,
+                    None,
+                    RoutingPerformanceHint {
+                        avg_tokens_per_second_milli: Some(10_000),
+                        avg_ttft_ms: Some(600),
+                    },
+                ),
+                (
+                    2u8,
+                    None,
+                    RoutingPerformanceHint {
+                        avg_tokens_per_second_milli: Some(8_000),
+                        avg_ttft_ms: Some(220),
+                    },
+                ),
+            ],
+            None,
+        );
+
+        assert_eq!(ordered, vec![2, 1]);
+    }
+
+    #[test]
+    fn test_reorder_candidates_by_context_prefers_higher_tps_for_large_requests() {
+        let ordered = reorder_candidates_by_context(
+            &[
+                (
+                    1u8,
+                    Some(16384),
+                    RoutingPerformanceHint {
+                        avg_tokens_per_second_milli: Some(10_000),
+                        avg_ttft_ms: Some(150),
+                    },
+                ),
+                (
+                    2u8,
+                    Some(16384),
+                    RoutingPerformanceHint {
+                        avg_tokens_per_second_milli: Some(24_000),
+                        avg_ttft_ms: Some(450),
+                    },
+                ),
+            ],
+            Some(4096),
+        );
+
+        assert_eq!(ordered, vec![2, 1]);
     }
 
     #[test]

@@ -117,6 +117,8 @@ pub struct RoutingMetricsStatusSnapshot {
     pub avg_attempt_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_tokens_per_second: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<f64>,
     pub completion_tokens_observed: u64,
     pub throughput_samples: u64,
     /// Current-node routing pressure and lightweight utilization proxies.
@@ -140,6 +142,7 @@ impl Default for RoutingMetricsStatusSnapshot {
             avg_queue_wait_ms: 0.0,
             avg_attempt_ms: 0.0,
             avg_tokens_per_second: None,
+            avg_ttft_ms: None,
             completion_tokens_observed: 0,
             throughput_samples: 0,
             local_node: LocalNodePressureSnapshot::default(),
@@ -163,6 +166,8 @@ pub struct LocalNodePressureSnapshot {
     pub avg_attempt_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_tokens_per_second: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<f64>,
     pub completion_tokens_observed: u64,
     pub throughput_samples: u64,
 }
@@ -198,6 +203,8 @@ pub struct ModelRoutingMetricsSnapshot {
     pub avg_attempt_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_tokens_per_second: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<f64>,
     pub completion_tokens_observed: u64,
     pub throughput_samples: u64,
     /// Local-only per-target routing outcome memory for this model.
@@ -228,6 +235,8 @@ pub struct TargetRoutingMetricsSnapshot {
     pub avg_attempt_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_tokens_per_second: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<f64>,
     pub completion_tokens_observed: u64,
     pub throughput_samples: u64,
     pub last_updated_secs_ago: u64,
@@ -339,6 +348,7 @@ impl RoutingMetrics {
         attempt_time: Duration,
         outcome: AttemptOutcome,
         completion_tokens: Option<u64>,
+        ttft_ms: Option<u64>,
     ) {
         let queue_wait_ms = duration_millis(queue_wait);
         let attempt_ms = duration_millis(attempt_time);
@@ -351,6 +361,7 @@ impl RoutingMetrics {
             outcome,
             completion_tokens,
             attempt_time,
+            ttft_ms,
         );
 
         if let Some(model) = normalized_model_name(model) {
@@ -366,6 +377,7 @@ impl RoutingMetrics {
                     attempt_ms,
                     outcome,
                     completion_tokens,
+                    ttft_ms,
                     config: &self.config,
                 },
             );
@@ -486,6 +498,8 @@ struct GlobalMetrics {
     completion_tokens_observed: AtomicU64,
     throughput_tps_milli_sum: AtomicU64,
     throughput_samples: AtomicU64,
+    ttft_ms_sum: AtomicU64,
+    ttft_samples: AtomicU64,
     locally_served_request_count: AtomicU64,
     remotely_served_request_count: AtomicU64,
     endpoint_request_count: AtomicU64,
@@ -509,6 +523,7 @@ impl GlobalMetrics {
         outcome: AttemptOutcome,
         completion_tokens: Option<u64>,
         attempt_time: Duration,
+        ttft_ms: Option<u64>,
     ) {
         self.attempt_count.fetch_add(1, Ordering::Relaxed);
         self.queue_wait_ms_total
@@ -536,6 +551,10 @@ impl GlobalMetrics {
                             .fetch_add(tps_milli, Ordering::Relaxed);
                         self.throughput_samples.fetch_add(1, Ordering::Relaxed);
                     }
+                }
+                if let Some(ttft) = ttft_ms {
+                    self.ttft_ms_sum.fetch_add(ttft, Ordering::Relaxed);
+                    self.ttft_samples.fetch_add(1, Ordering::Relaxed);
                 }
             }
             AttemptOutcome::Timeout => {
@@ -613,6 +632,8 @@ impl GlobalMetrics {
         let avg_attempt_ms = average(load_u64(&self.attempt_ms_total), attempt_count);
         let avg_tokens_per_second =
             average_milli(load_u64(&self.throughput_tps_milli_sum), throughput_samples);
+        let ttft_samples = load_u64(&self.ttft_samples);
+        let avg_ttft_ms = average_opt(load_u64(&self.ttft_ms_sum), ttft_samples);
         let local_node = LocalNodePressureSnapshot {
             current_inflight_requests,
             peak_inflight_requests: load_u64(&self.peak_inflight_requests),
@@ -622,6 +643,7 @@ impl GlobalMetrics {
             avg_queue_wait_ms,
             avg_attempt_ms,
             avg_tokens_per_second,
+            avg_ttft_ms,
             completion_tokens_observed,
             throughput_samples,
         };
@@ -658,6 +680,7 @@ impl GlobalMetrics {
             avg_queue_wait_ms,
             avg_attempt_ms,
             avg_tokens_per_second,
+            avg_ttft_ms,
             completion_tokens_observed,
             throughput_samples,
             local_node,
@@ -678,6 +701,7 @@ struct AttemptRecord<'a> {
     attempt_ms: u64,
     outcome: AttemptOutcome,
     completion_tokens: Option<u64>,
+    ttft_ms: Option<u64>,
     config: &'a MetricsConfig,
 }
 
@@ -742,6 +766,8 @@ struct ModelMetrics {
     completion_tokens_observed: u64,
     throughput_tps_milli_sum: u64,
     throughput_samples: u64,
+    ttft_ms_sum: u64,
+    ttft_samples: u64,
     targets: HashMap<TargetKey, TargetMetrics>,
 }
 
@@ -763,6 +789,8 @@ impl Default for ModelMetrics {
             completion_tokens_observed: 0,
             throughput_tps_milli_sum: 0,
             throughput_samples: 0,
+            ttft_ms_sum: 0,
+            ttft_samples: 0,
             targets: HashMap::new(),
         }
     }
@@ -789,6 +817,10 @@ impl ModelMetrics {
                         self.throughput_samples += 1;
                     }
                 }
+                if let Some(ttft) = record.ttft_ms {
+                    self.ttft_ms_sum = self.ttft_ms_sum.saturating_add(ttft);
+                    self.ttft_samples += 1;
+                }
             }
             AttemptOutcome::Timeout => self.attempt_timeout_count += 1,
             AttemptOutcome::Unavailable => self.attempt_unavailable_count += 1,
@@ -807,6 +839,7 @@ impl ModelMetrics {
             record.attempt_ms,
             record.outcome,
             record.completion_tokens,
+            record.ttft_ms,
         );
     }
 
@@ -867,6 +900,7 @@ impl ModelMetrics {
                     metrics.throughput_tps_milli_sum,
                     metrics.throughput_samples,
                 ),
+                avg_ttft_ms: average_opt(metrics.ttft_ms_sum, metrics.ttft_samples),
                 completion_tokens_observed: metrics.completion_tokens_observed,
                 throughput_samples: metrics.throughput_samples,
                 last_updated_secs_ago: now.duration_since(metrics.last_updated).as_secs(),
@@ -895,6 +929,7 @@ impl ModelMetrics {
                 self.throughput_tps_milli_sum,
                 self.throughput_samples,
             ),
+            avg_ttft_ms: average_opt(self.ttft_ms_sum, self.ttft_samples),
             completion_tokens_observed: self.completion_tokens_observed,
             throughput_samples: self.throughput_samples,
             targets,
@@ -915,6 +950,8 @@ struct TargetMetrics {
     completion_tokens_observed: u64,
     throughput_tps_milli_sum: u64,
     throughput_samples: u64,
+    ttft_ms_sum: u64,
+    ttft_samples: u64,
 }
 
 impl Default for TargetMetrics {
@@ -932,6 +969,8 @@ impl Default for TargetMetrics {
             completion_tokens_observed: 0,
             throughput_tps_milli_sum: 0,
             throughput_samples: 0,
+            ttft_ms_sum: 0,
+            ttft_samples: 0,
         }
     }
 }
@@ -943,6 +982,7 @@ impl TargetMetrics {
         attempt_ms: u64,
         outcome: AttemptOutcome,
         completion_tokens: Option<u64>,
+        ttft_ms: Option<u64>,
     ) {
         self.attempt_count += 1;
         self.queue_wait_ms_total = self.queue_wait_ms_total.saturating_add(queue_wait_ms);
@@ -960,6 +1000,10 @@ impl TargetMetrics {
                             self.throughput_tps_milli_sum.saturating_add(tps_milli);
                         self.throughput_samples += 1;
                     }
+                }
+                if let Some(ttft) = ttft_ms {
+                    self.ttft_ms_sum = self.ttft_ms_sum.saturating_add(ttft);
+                    self.ttft_samples += 1;
                 }
             }
             AttemptOutcome::Timeout => self.timeout_count += 1,
@@ -1029,6 +1073,14 @@ fn average_milli(total_milli: u64, count: u64) -> Option<f64> {
     }
 }
 
+fn average_opt(total: u64, count: u64) -> Option<f64> {
+    if count == 0 {
+        None
+    } else {
+        Some(total as f64 / count as f64)
+    }
+}
+
 fn tokens_per_second_milli(tokens: u64, elapsed: Duration) -> Option<u64> {
     let secs = elapsed.as_secs_f64();
     if tokens == 0 || secs <= 0.0 {
@@ -1091,6 +1143,7 @@ mod tests {
             Duration::from_millis(10),
             AttemptOutcome::Success,
             Some(8),
+            None,
         );
         metrics.record_attempt(
             Some("alpha"),
@@ -1099,6 +1152,7 @@ mod tests {
             Duration::from_millis(12),
             AttemptOutcome::Success,
             Some(9),
+            None,
         );
         metrics.record_attempt(
             Some("alpha"),
@@ -1106,6 +1160,7 @@ mod tests {
             Duration::from_millis(3),
             Duration::from_millis(15),
             AttemptOutcome::Timeout,
+            None,
             None,
         );
         metrics.record_attempt(
@@ -1115,6 +1170,7 @@ mod tests {
             Duration::from_millis(11),
             AttemptOutcome::Success,
             Some(7),
+            None,
         );
         metrics.record_attempt(
             Some("gamma"),
@@ -1122,6 +1178,7 @@ mod tests {
             Duration::from_millis(4),
             Duration::from_millis(20),
             AttemptOutcome::Unavailable,
+            None,
             None,
         );
 
@@ -1142,6 +1199,7 @@ mod tests {
             Duration::from_millis(10),
             AttemptOutcome::Success,
             Some(3),
+            None,
         );
         metrics.age_model_for_test("stale", Duration::from_secs(2));
 
@@ -1160,6 +1218,7 @@ mod tests {
             Duration::from_millis(20),
             AttemptOutcome::Timeout,
             None,
+            None,
         );
         metrics.record_attempt(
             Some("glm"),
@@ -1168,6 +1227,7 @@ mod tests {
             Duration::from_millis(40),
             AttemptOutcome::Success,
             Some(12),
+            None,
         );
         metrics.record_request(
             Some("glm"),
@@ -1181,6 +1241,7 @@ mod tests {
             Duration::from_millis(2),
             Duration::from_millis(16),
             AttemptOutcome::Rejected,
+            None,
             None,
         );
         metrics.record_request(
@@ -1221,6 +1282,7 @@ mod tests {
             Duration::from_millis(14),
             AttemptOutcome::Unavailable,
             None,
+            None,
         );
         metrics.record_request(None, 1, RequestOutcome::Unavailable);
 
@@ -1242,6 +1304,7 @@ mod tests {
             Duration::from_millis(5),
             AttemptOutcome::Success,
             Some(2),
+            None,
         );
         metrics.record_request(
             Some("auto"),
@@ -1291,6 +1354,7 @@ mod tests {
                         Duration::from_millis(10),
                         AttemptOutcome::Success,
                         Some(4),
+                        None,
                     );
                     metrics.record_request(
                         Some(&model),

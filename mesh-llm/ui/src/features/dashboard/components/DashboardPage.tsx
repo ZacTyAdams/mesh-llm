@@ -98,6 +98,20 @@ type ActivePeerRow = {
   shareLabel: string;
 };
 
+function formatPerfTtft(ttftMs?: number) {
+  if (typeof ttftMs !== "number" || !Number.isFinite(ttftMs) || ttftMs <= 0) {
+    return "n/a";
+  }
+  return `${Math.round(ttftMs)} ms`;
+}
+
+function formatPerfTps(tpsMilli?: number) {
+  if (typeof tpsMilli !== "number" || !Number.isFinite(tpsMilli) || tpsMilli <= 0) {
+    return "n/a";
+  }
+  return `${(tpsMilli / 1000).toFixed(1)} tok/s`;
+}
+
 type NodeSidebarRecord = {
   id: string;
   title: string;
@@ -237,6 +251,7 @@ export function DashboardPage({
         peer.state !== "client" && totalMeshVramGb > 0
           ? Math.round((peerDisplayVramGb / totalMeshVramGb) * 100)
           : null;
+      const perfModelLabel = peer.perf_hint_model ? shortName(peer.perf_hint_model) : "n/a";
       return {
         ...peer,
         friendlyName: peerFriendlyName(peer),
@@ -244,6 +259,9 @@ export function DashboardPage({
         displayVramGb: peerDisplayVramGb,
         modelLabel,
         latencyLabel,
+        perfModelLabel,
+        perfTtftLabel: formatPerfTtft(peer.avg_ttft_ms),
+        perfTpsLabel: formatPerfTps(peer.avg_tokens_per_second_milli),
         shareLabel: sharePct == null ? "n/a" : `${sharePct}%`,
       };
     });
@@ -608,7 +626,7 @@ export function DashboardPage({
           {peerRows.length > 0 ? (
             <ScrollArea horizontal className="max-h-[18rem] md:max-h-[20rem]">
               <div className="pr-3">
-                <Table className="min-w-[1040px]">
+                <Table className="min-w-[1200px]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Name</TableHead>
@@ -617,7 +635,10 @@ export function DashboardPage({
                       <TableHead>Version</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead>Model</TableHead>
+                      <TableHead>Perf Model</TableHead>
                       <TableHead className="text-right">Latency</TableHead>
+                      <TableHead className="text-right">TTFT</TableHead>
+                      <TableHead className="text-right">TPS</TableHead>
                       <TableHead className="text-right">VRAM</TableHead>
                       <TableHead className="text-right whitespace-nowrap">Share</TableHead>
                     </TableRow>
@@ -667,7 +688,12 @@ export function DashboardPage({
                         <TableCell className="max-w-[180px] truncate">
                           {peer.modelLabel}
                         </TableCell>
+                        <TableCell className="max-w-[180px] truncate">
+                          {peer.perfModelLabel}
+                        </TableCell>
                         <TableCell className="text-right">{peer.latencyLabel}</TableCell>
+                        <TableCell className="text-right">{peer.perfTtftLabel}</TableCell>
+                        <TableCell className="text-right">{peer.perfTpsLabel}</TableCell>
                         <TableCell className="text-right">
                           {peer.state === "client" ? "n/a" : `${peer.displayVramGb.toFixed(1)} GB`}
                         </TableCell>

@@ -814,6 +814,8 @@ fn derive_peer_state(peer: &mesh::PeerInfo) -> NodeState {
 }
 
 fn build_peer_payload(peer: &mesh::PeerInfo) -> PeerPayload {
+    let (perf_hint_model, avg_tokens_per_second_milli, avg_ttft_ms) =
+        best_peer_performance_hint(peer);
     PeerPayload {
         id: peer.id.fmt_short().to_string(),
         owner: build_ownership_payload(&peer.owner_summary),
@@ -832,6 +834,9 @@ fn build_peer_payload(peer: &mesh::PeerInfo) -> PeerPayload {
         hosted_models_known: peer.hosted_models_known,
         version: peer.version.clone(),
         rtt_ms: peer.rtt_ms,
+        perf_hint_model,
+        avg_tokens_per_second_milli,
+        avg_ttft_ms,
         hostname: peer.hostname.clone(),
         is_soc: peer.is_soc,
         gpus: build_gpus(
@@ -843,6 +848,46 @@ fn build_peer_payload(peer: &mesh::PeerInfo) -> PeerPayload {
             peer.gpu_compute_tflops_fp16.as_deref(),
         ),
         first_joined_mesh_ts: peer.first_joined_mesh_ts,
+    }
+}
+
+fn best_peer_performance_hint(peer: &mesh::PeerInfo) -> (Option<String>, Option<u32>, Option<u32>) {
+    let best = peer
+        .served_model_runtime
+        .iter()
+        .filter(|runtime| {
+            !runtime.model_name.trim().is_empty()
+                && (runtime.avg_tokens_per_second_milli.is_some() || runtime.avg_ttft_ms.is_some())
+        })
+        .min_by(|left, right| {
+            match (left.avg_ttft_ms, right.avg_ttft_ms) {
+                (Some(left_ttft), Some(right_ttft)) => left_ttft.cmp(&right_ttft),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+            .then_with(|| {
+                match (
+                    left.avg_tokens_per_second_milli,
+                    right.avg_tokens_per_second_milli,
+                ) {
+                    (Some(left_tps), Some(right_tps)) => right_tps.cmp(&left_tps),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            })
+            .then_with(|| left.model_name.cmp(&right.model_name))
+        });
+
+    if let Some(runtime) = best {
+        (
+            Some(runtime.model_name.clone()),
+            runtime.avg_tokens_per_second_milli,
+            runtime.avg_ttft_ms,
+        )
+    } else {
+        (None, None, None)
     }
 }
 

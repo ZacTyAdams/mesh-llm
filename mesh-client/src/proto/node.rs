@@ -212,6 +212,10 @@ pub struct ModelRuntimeDescriptor {
     pub context_length: ::core::option::Option<u32>,
     #[prost(bool, tag = "4")]
     pub ready: bool,
+    #[prost(uint32, optional, tag = "5")]
+    pub avg_tokens_per_second_milli: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub avg_ttft_ms: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ModelMoeInfo {

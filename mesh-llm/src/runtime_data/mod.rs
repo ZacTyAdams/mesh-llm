@@ -1305,6 +1305,7 @@ mod tests {
             std::time::Duration::from_millis(12),
             crate::network::metrics::AttemptOutcome::Success,
             Some(5),
+            None,
         );
         assert!(subscription.has_changed().expect("watch channel open"));
         let attempted = *subscription.borrow_and_update();

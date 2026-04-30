@@ -214,6 +214,8 @@ fn runtime_descriptor_to_proto(
         identity_hash: descriptor.identity_hash.clone(),
         context_length: descriptor.context_length,
         ready: descriptor.ready,
+        avg_tokens_per_second_milli: descriptor.avg_tokens_per_second_milli,
+        avg_ttft_ms: descriptor.avg_ttft_ms,
     }
 }
 
@@ -225,6 +227,8 @@ fn proto_runtime_descriptor_to_local(
         identity_hash: descriptor.identity_hash.clone(),
         context_length: descriptor.context_length,
         ready: descriptor.ready,
+        avg_tokens_per_second_milli: descriptor.avg_tokens_per_second_milli,
+        avg_ttft_ms: descriptor.avg_ttft_ms,
     }
 }
 

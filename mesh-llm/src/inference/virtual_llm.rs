@@ -61,17 +61,19 @@ async fn caption_image(
     image_url: &str,
     user_text: &str,
 ) -> Value {
-    let peer_id = match consult::find_vision_peer(node, current_model).await {
-        Some(id) => id,
+    let (peer_id, vision_model) = match consult::find_vision_peer(
+        node,
+        current_model,
+        consult::ConsultationRequestClass::Interactive,
+    )
+    .await
+    {
+        Some(selected) => selected,
         None => {
             tracing::info!("virtual: no vision peer available");
             return json!({ "action": "none" });
         }
     };
-
-    let vision_model =
-        peer_model_with_capability(node, peer_id, |d| d.capabilities.supports_vision_runtime())
-            .await;
 
     tracing::info!(
         "virtual: captioning via {} model={vision_model}",
@@ -94,17 +96,19 @@ async fn caption_image(
 }
 
 async fn transcribe_audio(node: &mesh::Node, current_model: &str) -> Value {
-    let peer_id = match consult::find_audio_peer(node, current_model).await {
-        Some(id) => id,
+    let (peer_id, audio_model) = match consult::find_audio_peer(
+        node,
+        current_model,
+        consult::ConsultationRequestClass::Interactive,
+    )
+    .await
+    {
+        Some(selected) => selected,
         None => {
             tracing::info!("virtual: no audio peer available");
             return json!({ "action": "none" });
         }
     };
-
-    let audio_model =
-        peer_model_with_capability(node, peer_id, |d| d.capabilities.supports_audio_runtime())
-            .await;
 
     // TODO: extract audio data from payload and send to peer
     // For now, log that we found a peer but can't extract audio yet
@@ -113,25 +117,6 @@ async fn transcribe_audio(node: &mesh::Node, current_model: &str) -> Value {
         peer_id.fmt_short()
     );
     json!({ "action": "none" })
-}
-
-/// Look up a peer's model name matching a capability predicate.
-async fn peer_model_with_capability(
-    node: &mesh::Node,
-    peer_id: iroh::EndpointId,
-    predicate: impl Fn(&crate::mesh::ServedModelDescriptor) -> bool,
-) -> String {
-    let peers = node.peers().await;
-    peers
-        .iter()
-        .find(|p| p.id == peer_id)
-        .and_then(|p| {
-            p.served_model_descriptors
-                .iter()
-                .find(|d| predicate(d))
-                .map(|d| d.identity.model_name.clone())
-        })
-        .unwrap_or_default()
 }
 
 // ===========================================================================
@@ -209,7 +194,12 @@ async fn get_peer_hint(
     messages: &[Value],
     timeout: std::time::Duration,
 ) -> Value {
-    let peers = consult::find_different_model_peers(node, current_model, 2).await;
+    let request_class = if timeout <= std::time::Duration::from_secs(6) {
+        consult::ConsultationRequestClass::Throughput
+    } else {
+        consult::ConsultationRequestClass::Interactive
+    };
+    let peers = consult::find_different_model_peers(node, current_model, 2, request_class).await;
     if peers.is_empty() {
         tracing::info!("virtual: no different model available");
         return json!({ "action": "none" });

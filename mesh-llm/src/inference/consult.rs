@@ -15,6 +15,165 @@ use crate::mesh;
 use anyhow::Result;
 use iroh::EndpointId;
 use serde_json::Value;
+use std::cmp::Ordering;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ConsultationPerformanceHint {
+    avg_ttft_ms: Option<u32>,
+    avg_tokens_per_second_milli: Option<u32>,
+    rtt_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsultationRequestClass {
+    Interactive,
+    Throughput,
+}
+
+fn compare_optional_ascending(left: Option<u32>, right: Option<u32>) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn compare_optional_descending(left: Option<u32>, right: Option<u32>) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => right.cmp(&left),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn compare_consultation_performance(
+    left: ConsultationPerformanceHint,
+    right: ConsultationPerformanceHint,
+    request_class: ConsultationRequestClass,
+) -> Ordering {
+    match request_class {
+        ConsultationRequestClass::Interactive => {
+            compare_optional_ascending(left.avg_ttft_ms, right.avg_ttft_ms)
+                .then_with(|| {
+                    compare_optional_descending(
+                        left.avg_tokens_per_second_milli,
+                        right.avg_tokens_per_second_milli,
+                    )
+                })
+                .then_with(|| compare_optional_ascending(left.rtt_ms, right.rtt_ms))
+        }
+        ConsultationRequestClass::Throughput => compare_optional_descending(
+            left.avg_tokens_per_second_milli,
+            right.avg_tokens_per_second_milli,
+        )
+        .then_with(|| compare_optional_ascending(left.avg_ttft_ms, right.avg_ttft_ms))
+        .then_with(|| compare_optional_ascending(left.rtt_ms, right.rtt_ms)),
+    }
+}
+
+fn model_performance_hint(peer: &mesh::PeerInfo, model_name: &str) -> ConsultationPerformanceHint {
+    ConsultationPerformanceHint {
+        avg_ttft_ms: peer.advertised_avg_ttft_ms(model_name),
+        avg_tokens_per_second_milli: peer.advertised_avg_tokens_per_second_milli(model_name),
+        rtt_ms: peer.rtt_ms,
+    }
+}
+
+fn select_capability_peer_from_peers<F>(
+    peers: &[mesh::PeerInfo],
+    exclude_model: &str,
+    request_class: ConsultationRequestClass,
+    supports: F,
+) -> Option<(EndpointId, String)>
+where
+    F: Fn(&mesh::ServedModelDescriptor) -> bool,
+{
+    peers
+        .iter()
+        .filter_map(|peer| {
+            peer.served_model_descriptors
+                .iter()
+                .filter(|descriptor| {
+                    supports(descriptor)
+                        && descriptor.identity.model_name != exclude_model
+                        && !descriptor.identity.model_name.is_empty()
+                })
+                .map(|descriptor| {
+                    let model_name = descriptor.identity.model_name.clone();
+                    (
+                        peer.id,
+                        model_name.clone(),
+                        model_performance_hint(peer, &model_name),
+                    )
+                })
+                .min_by(|(_, left_model, left_perf), (_, right_model, right_perf)| {
+                    compare_consultation_performance(*left_perf, *right_perf, request_class)
+                        .then_with(|| left_model.cmp(right_model))
+                })
+        })
+        .min_by(
+            |(left_id, left_model, left_perf), (right_id, right_model, right_perf)| {
+                compare_consultation_performance(*left_perf, *right_perf, request_class)
+                    .then_with(|| left_model.cmp(right_model))
+                    .then_with(|| left_id.as_bytes().cmp(right_id.as_bytes()))
+            },
+        )
+        .map(|(peer_id, model_name, _)| (peer_id, model_name))
+}
+
+fn find_different_model_peers_from_peers(
+    peers: &[mesh::PeerInfo],
+    current_model: &str,
+    n: usize,
+    request_class: ConsultationRequestClass,
+) -> Vec<(EndpointId, String)> {
+    use crate::models::CapabilityLevel;
+
+    let mut candidates: Vec<_> = peers
+        .iter()
+        .flat_map(|peer| {
+            peer.served_model_descriptors
+                .iter()
+                .filter(|descriptor| {
+                    descriptor.identity.model_name != current_model
+                        && !descriptor.identity.model_name.is_empty()
+                })
+                .map(|descriptor| {
+                    let model_name = descriptor.identity.model_name.clone();
+                    (
+                        peer.id,
+                        model_name.clone(),
+                        descriptor.capabilities.reasoning != CapabilityLevel::None,
+                        model_performance_hint(peer, &model_name),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    candidates.sort_by(
+        |(left_id, left_model, left_reasoning, left_perf),
+         (right_id, right_model, right_reasoning, right_perf)| {
+            right_reasoning
+                .cmp(left_reasoning)
+                .then_with(|| {
+                    compare_consultation_performance(*left_perf, *right_perf, request_class)
+                })
+                .then_with(|| left_model.cmp(right_model))
+                .then_with(|| left_id.as_bytes().cmp(right_id.as_bytes()))
+        },
+    );
+
+    let mut seen_models = std::collections::HashSet::new();
+    candidates.retain(|(_, model, _, _)| seen_models.insert(model.clone()));
+    candidates.truncate(n);
+    candidates
+        .into_iter()
+        .map(|(id, model, _, _)| (id, model))
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Peer discovery
@@ -22,32 +181,28 @@ use serde_json::Value;
 
 /// Find a peer that can handle vision (images).
 /// Returns None if no vision-capable peer exists in the mesh.
-pub async fn find_vision_peer(node: &mesh::Node, exclude_model: &str) -> Option<EndpointId> {
+pub async fn find_vision_peer(
+    node: &mesh::Node,
+    exclude_model: &str,
+    request_class: ConsultationRequestClass,
+) -> Option<(EndpointId, String)> {
     let peers = node.peers().await;
-    peers
-        .iter()
-        .filter(|p| {
-            p.served_model_descriptors.iter().any(|d| {
-                d.capabilities.supports_vision_runtime() && d.identity.model_name != exclude_model
-            })
-        })
-        .min_by_key(|p| p.rtt_ms.unwrap_or(u32::MAX))
-        .map(|p| p.id)
+    select_capability_peer_from_peers(&peers, exclude_model, request_class, |descriptor| {
+        descriptor.capabilities.supports_vision_runtime()
+    })
 }
 
 /// Find a peer that can handle audio.
 /// Returns None if no audio-capable peer exists in the mesh.
-pub async fn find_audio_peer(node: &mesh::Node, exclude_model: &str) -> Option<EndpointId> {
+pub async fn find_audio_peer(
+    node: &mesh::Node,
+    exclude_model: &str,
+    request_class: ConsultationRequestClass,
+) -> Option<(EndpointId, String)> {
     let peers = node.peers().await;
-    peers
-        .iter()
-        .filter(|p| {
-            p.served_model_descriptors.iter().any(|d| {
-                d.capabilities.supports_audio_runtime() && d.identity.model_name != exclude_model
-            })
-        })
-        .min_by_key(|p| p.rtt_ms.unwrap_or(u32::MAX))
-        .map(|p| p.id)
+    select_capability_peer_from_peers(&peers, exclude_model, request_class, |descriptor| {
+        descriptor.capabilities.supports_audio_runtime()
+    })
 }
 
 /// Find up to `n` peers serving a *different* model from the current one,
@@ -60,33 +215,10 @@ pub async fn find_different_model_peers(
     node: &mesh::Node,
     current_model: &str,
     n: usize,
+    request_class: ConsultationRequestClass,
 ) -> Vec<(EndpointId, String)> {
-    use crate::models::CapabilityLevel;
-
     let peers = node.peers().await;
-
-    let mut candidates: Vec<_> = peers
-        .iter()
-        .filter_map(|p| {
-            let different = p.served_model_descriptors.iter().find(|d| {
-                d.identity.model_name != current_model && !d.identity.model_name.is_empty()
-            });
-            different.map(|d| {
-                let rtt = p.rtt_ms.unwrap_or(500);
-                let has_reasoning = d.capabilities.reasoning != CapabilityLevel::None;
-                // Sort key: reasoning models first (0), then non-reasoning (1), then RTT
-                let score = if has_reasoning { rtt } else { 10_000 + rtt };
-                (p.id, d.identity.model_name.clone(), score)
-            })
-        })
-        .collect();
-
-    candidates.sort_by_key(|(_, _, score)| *score);
-    // Deduplicate by model name — keep the best-scored peer for each model.
-    let mut seen_models = std::collections::HashSet::new();
-    candidates.retain(|(_, model, _)| seen_models.insert(model.clone()));
-    candidates.truncate(n);
-    candidates.into_iter().map(|(id, m, _)| (id, m)).collect()
+    find_different_model_peers_from_peers(&peers, current_model, n, request_class)
 }
 
 // ---------------------------------------------------------------------------
@@ -354,4 +486,308 @@ pub async fn race_second_opinion(
 
     tracing::warn!("virtual: all peers failed");
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::OwnershipSummary;
+    use crate::mesh::{
+        ModelRuntimeDescriptor, NodeRole, PeerInfo, ServedModelDescriptor, ServedModelIdentity,
+    };
+    use crate::models::{CapabilityLevel, ModelCapabilities};
+    use iroh::{EndpointAddr, SecretKey};
+    use std::collections::HashMap;
+
+    fn test_endpoint_id(seed: u8) -> EndpointId {
+        EndpointId::from(SecretKey::from_bytes(&[seed; 32]).public())
+    }
+
+    fn test_peer(
+        seed: u8,
+        rtt_ms: Option<u32>,
+        descriptors: Vec<ServedModelDescriptor>,
+        runtimes: Vec<ModelRuntimeDescriptor>,
+    ) -> PeerInfo {
+        let id = test_endpoint_id(seed);
+        PeerInfo {
+            id,
+            addr: EndpointAddr {
+                id,
+                addrs: Default::default(),
+            },
+            tunnel_port: None,
+            role: NodeRole::Host { http_port: 9337 },
+            first_joined_mesh_ts: None,
+            models: vec![],
+            vram_bytes: 0,
+            rtt_ms,
+            model_source: None,
+            serving_models: descriptors
+                .iter()
+                .map(|descriptor| descriptor.identity.model_name.clone())
+                .collect(),
+            hosted_models: vec![],
+            hosted_models_known: false,
+            available_models: vec![],
+            requested_models: vec![],
+            last_seen: std::time::Instant::now(),
+            last_mentioned: std::time::Instant::now(),
+            moe_recovered_at: None,
+            version: None,
+            gpu_name: None,
+            hostname: None,
+            is_soc: None,
+            gpu_vram: None,
+            gpu_reserved_bytes: None,
+            gpu_mem_bandwidth_gbps: None,
+            gpu_compute_tflops_fp32: None,
+            gpu_compute_tflops_fp16: None,
+            available_model_metadata: vec![],
+            experts_summary: None,
+            available_model_sizes: HashMap::new(),
+            served_model_descriptors: descriptors,
+            served_model_runtime: runtimes,
+            owner_attestation: None,
+            owner_summary: OwnershipSummary::default(),
+        }
+    }
+
+    fn descriptor(
+        model_name: &str,
+        vision: bool,
+        audio: bool,
+        reasoning: CapabilityLevel,
+    ) -> ServedModelDescriptor {
+        ServedModelDescriptor {
+            identity: ServedModelIdentity {
+                model_name: model_name.to_string(),
+                ..Default::default()
+            },
+            capabilities: ModelCapabilities {
+                vision: if vision {
+                    CapabilityLevel::Supported
+                } else {
+                    CapabilityLevel::None
+                },
+                audio: if audio {
+                    CapabilityLevel::Supported
+                } else {
+                    CapabilityLevel::None
+                },
+                reasoning,
+                ..Default::default()
+            },
+            topology: None,
+        }
+    }
+
+    fn runtime(
+        model_name: &str,
+        tps_milli: Option<u32>,
+        ttft_ms: Option<u32>,
+    ) -> ModelRuntimeDescriptor {
+        ModelRuntimeDescriptor {
+            model_name: model_name.to_string(),
+            identity_hash: None,
+            context_length: Some(8192),
+            ready: true,
+            avg_tokens_per_second_milli: tps_milli,
+            avg_ttft_ms: ttft_ms,
+        }
+    }
+
+    #[test]
+    fn select_capability_peer_prefers_lower_ttft_over_rtt() {
+        let fast_rtt_slow_model = test_peer(
+            1,
+            Some(20),
+            vec![descriptor(
+                "vision-slow",
+                true,
+                false,
+                CapabilityLevel::None,
+            )],
+            vec![runtime("vision-slow", Some(18_000), Some(900))],
+        );
+        let slower_rtt_fast_model = test_peer(
+            2,
+            Some(80),
+            vec![descriptor(
+                "vision-fast",
+                true,
+                false,
+                CapabilityLevel::None,
+            )],
+            vec![runtime("vision-fast", Some(12_000), Some(200))],
+        );
+
+        let selected = select_capability_peer_from_peers(
+            &[fast_rtt_slow_model, slower_rtt_fast_model],
+            "excluded",
+            ConsultationRequestClass::Interactive,
+            |candidate| candidate.capabilities.supports_vision_runtime(),
+        );
+
+        assert_eq!(
+            selected.map(|(_, model)| model),
+            Some("vision-fast".to_string())
+        );
+    }
+
+    #[test]
+    fn select_capability_peer_falls_back_to_rtt_without_perf_data() {
+        let first = test_peer(
+            1,
+            Some(25),
+            vec![descriptor("audio-a", false, true, CapabilityLevel::None)],
+            vec![runtime("audio-a", None, None)],
+        );
+        let second = test_peer(
+            2,
+            Some(90),
+            vec![descriptor("audio-b", false, true, CapabilityLevel::None)],
+            vec![runtime("audio-b", None, None)],
+        );
+
+        let selected = select_capability_peer_from_peers(
+            &[first, second],
+            "excluded",
+            ConsultationRequestClass::Interactive,
+            |candidate| candidate.capabilities.supports_audio_runtime(),
+        );
+
+        assert_eq!(
+            selected.map(|(_, model)| model),
+            Some("audio-a".to_string())
+        );
+    }
+
+    #[test]
+    fn find_different_model_peers_prefers_reasoning_then_perf() {
+        let non_reasoning = test_peer(
+            1,
+            Some(10),
+            vec![descriptor("fast-chat", false, false, CapabilityLevel::None)],
+            vec![runtime("fast-chat", Some(25_000), Some(150))],
+        );
+        let reasoning_slow_rtt_fast_ttft = test_peer(
+            2,
+            Some(120),
+            vec![descriptor(
+                "reasoner-a",
+                false,
+                false,
+                CapabilityLevel::Supported,
+            )],
+            vec![runtime("reasoner-a", Some(10_000), Some(220))],
+        );
+        let reasoning_fast_rtt_slow_ttft = test_peer(
+            3,
+            Some(20),
+            vec![descriptor(
+                "reasoner-b",
+                false,
+                false,
+                CapabilityLevel::Supported,
+            )],
+            vec![runtime("reasoner-b", Some(18_000), Some(800))],
+        );
+
+        let selected = find_different_model_peers_from_peers(
+            &[
+                non_reasoning,
+                reasoning_fast_rtt_slow_ttft,
+                reasoning_slow_rtt_fast_ttft,
+            ],
+            "current-model",
+            3,
+            ConsultationRequestClass::Interactive,
+        );
+
+        assert_eq!(
+            selected,
+            vec![
+                (test_endpoint_id(2), "reasoner-a".to_string()),
+                (test_endpoint_id(3), "reasoner-b".to_string()),
+                (test_endpoint_id(1), "fast-chat".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn find_different_model_peers_deduplicates_by_model_name() {
+        let better = test_peer(
+            1,
+            Some(60),
+            vec![descriptor(
+                "shared-model",
+                false,
+                false,
+                CapabilityLevel::Supported,
+            )],
+            vec![runtime("shared-model", Some(18_000), Some(180))],
+        );
+        let worse = test_peer(
+            2,
+            Some(20),
+            vec![descriptor(
+                "shared-model",
+                false,
+                false,
+                CapabilityLevel::Supported,
+            )],
+            vec![runtime("shared-model", Some(5_000), Some(900))],
+        );
+
+        let selected = find_different_model_peers_from_peers(
+            &[worse, better],
+            "current-model",
+            2,
+            ConsultationRequestClass::Interactive,
+        );
+
+        assert_eq!(
+            selected,
+            vec![(test_endpoint_id(1), "shared-model".to_string())]
+        );
+    }
+
+    #[test]
+    fn select_capability_peer_prefers_higher_tps_for_throughput_class() {
+        let fast_ttft = test_peer(
+            1,
+            Some(20),
+            vec![descriptor(
+                "vision-fast-start",
+                true,
+                false,
+                CapabilityLevel::None,
+            )],
+            vec![runtime("vision-fast-start", Some(9_000), Some(150))],
+        );
+        let high_tps = test_peer(
+            2,
+            Some(40),
+            vec![descriptor(
+                "vision-high-tps",
+                true,
+                false,
+                CapabilityLevel::None,
+            )],
+            vec![runtime("vision-high-tps", Some(24_000), Some(400))],
+        );
+
+        let selected = select_capability_peer_from_peers(
+            &[fast_ttft, high_tps],
+            "excluded",
+            ConsultationRequestClass::Throughput,
+            |candidate| candidate.capabilities.supports_vision_runtime(),
+        );
+
+        assert_eq!(
+            selected.map(|(_, model)| model),
+            Some("vision-high-tps".to_string())
+        );
+    }
 }

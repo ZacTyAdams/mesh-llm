@@ -76,6 +76,9 @@ export type Peer = {
   hosted_models?: string[];
   hosted_models_known?: boolean;
   rtt_ms?: number | null;
+  perf_hint_model?: string;
+  avg_tokens_per_second_milli?: number;
+  avg_ttft_ms?: number;
   hostname?: string;
   version?: string;
   is_soc?: boolean;
