@@ -15,6 +15,8 @@ BIN="$ROOT_DIR/target/release/mesh-llm"
 #   QUICKTEST_OFFLINE         1/0, default 1
 #   QUICKTEST_HEADLESS        1/0, default 0
 #   QUICKTEST_LOG_FORMAT      pretty/json, default pretty
+#   QUICKTEST_BACKGROUND      1/0, default 0 (run mesh-llm in background)
+#   QUICKTEST_INTERACTIVE     1/0, default 0 (enable TUI/interactive terminal mode)
 TOKEN_FILE="${QUICKTEST_TOKEN_FILE:-$HOME/.mesh-llm/quicktest-client.token}"
 FORCE_DISCOVERY="${QUICKTEST_FORCE_DISCOVERY:-1}"
 DISCOVER_WAIT="${QUICKTEST_DISCOVER_WAIT:-6}"
@@ -22,7 +24,9 @@ RESTART_DELAY="${QUICKTEST_RESTART_DELAY:-3}"
 BOOTSTRAP_IF_NONE="${QUICKTEST_BOOTSTRAP_IF_NONE:-1}"
 OFFLINE="${QUICKTEST_OFFLINE:-1}"
 HEADLESS="${QUICKTEST_HEADLESS:-0}"
+INTERACTIVE="${QUICKTEST_INTERACTIVE:-0}"
 LOG_FORMAT="${QUICKTEST_LOG_FORMAT:-pretty}"
+BACKGROUND="${QUICKTEST_BACKGROUND:-0}"
 
 stop_requested=0
 runtime_pid=""
@@ -135,22 +139,33 @@ run_client() {
 	else
 		echo "[quicktest-client] no token found, bootstrapping a private mesh"
 	fi
-	if [[ -r /dev/tty ]]; then
-		"$BIN" "${args[@]}" </dev/tty &
-	else
-		"$BIN" "${args[@]}" &
+	if [[ "$BACKGROUND" == "1" ]]; then
+		if [[ "$INTERACTIVE" == "1" && -r /dev/tty ]]; then
+			"$BIN" "${args[@]}" </dev/tty &
+		else
+			"$BIN" "${args[@]}" </dev/null &
+		fi
+		runtime_pid=$!
+		wait "$runtime_pid"
+		local code=$?
+		runtime_pid=""
+		return "$code"
 	fi
-	runtime_pid=$!
-	wait "$runtime_pid"
-	local code=$?
-	runtime_pid=""
-	return "$code"
+
+	if [[ "$INTERACTIVE" == "1" && -r /dev/tty ]]; then
+		"$BIN" "${args[@]}" </dev/tty
+	else
+		"$BIN" "${args[@]}" </dev/null
+	fi
+	return $?
 }
 
 echo "[quicktest-client] binary: $BIN"
 echo "[quicktest-client] offline: $OFFLINE, headless: $HEADLESS, log-format: $LOG_FORMAT"
+echo "[quicktest-client] background mode: $BACKGROUND"
 echo "[quicktest-client] force discovery: $FORCE_DISCOVERY"
 echo "[quicktest-client] token file: $TOKEN_FILE"
+echo "[quicktest-client] interactive: $INTERACTIVE"
 
 while [[ "$stop_requested" -eq 0 ]]; do
 	token="$(load_token)"

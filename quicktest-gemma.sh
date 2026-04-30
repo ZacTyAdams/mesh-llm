@@ -16,6 +16,7 @@ BIN="$ROOT_DIR/target/release/mesh-llm"
 #   QUICKTEST_LISTEN_ALL      1/0, default 1
 #   QUICKTEST_LOG_FORMAT      pretty/json, default pretty
 #   QUICKTEST_MODEL           Model ref to serve
+#   QUICKTEST_INTERACTIVE     1/0, default 0 (enable TUI/interactive terminal mode)
 TOKEN_FILE="${QUICKTEST_TOKEN_FILE:-$HOME/.mesh-llm/quicktest-worker.token}"
 FORCE_DISCOVERY="${QUICKTEST_FORCE_DISCOVERY:-1}"
 DISCOVER_WAIT="${QUICKTEST_DISCOVER_WAIT:-6}"
@@ -25,6 +26,7 @@ HEADLESS="${QUICKTEST_HEADLESS:-1}"
 LISTEN_ALL="${QUICKTEST_LISTEN_ALL:-1}"
 LOG_FORMAT="${QUICKTEST_LOG_FORMAT:-pretty}"
 MODEL_REF="${QUICKTEST_MODEL:-unsloth/gemma-4-31B-it-GGUF:UD-IQ2_XXS}"
+INTERACTIVE="${QUICKTEST_INTERACTIVE:-0}"
 
 stop_requested=0
 runtime_pid=""
@@ -133,16 +135,12 @@ run_worker() {
 
 	echo "[quicktest-gemma] starting worker model: $MODEL_REF"
 	echo "[quicktest-gemma] token source: ${TOKEN_FILE}"
-	if [[ -r /dev/tty ]]; then
-		"$BIN" "${args[@]}" </dev/tty &
+	if [[ "$INTERACTIVE" == "1" && -r /dev/tty ]]; then
+		"$BIN" "${args[@]}" </dev/tty
 	else
-		"$BIN" "${args[@]}" &
+		"$BIN" "${args[@]}" </dev/null
 	fi
-	runtime_pid=$!
-	wait "$runtime_pid"
-	local code=$?
-	runtime_pid=""
-	return "$code"
+	return $?
 }
 
 echo "[quicktest-gemma] binary: $BIN"
@@ -150,6 +148,7 @@ echo "[quicktest-gemma] model: $MODEL_REF"
 echo "[quicktest-gemma] offline: $OFFLINE, headless: $HEADLESS, listen-all: $LISTEN_ALL"
 echo "[quicktest-gemma] force discovery: $FORCE_DISCOVERY"
 echo "[quicktest-gemma] token file: $TOKEN_FILE"
+echo "[quicktest-gemma] interactive: $INTERACTIVE"
 
 while [[ "$stop_requested" -eq 0 ]]; do
 	token="$(load_token)"
